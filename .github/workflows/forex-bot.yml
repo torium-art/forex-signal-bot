@@ -1,0 +1,37 @@
+
+name: Forex Signal Bot
+
+on:
+  schedule:
+    # Кожні 5 хвилин (GitHub може давати затримку в кілька хвилин, це нормально)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # дозволяє запустити вручну кнопкою в GitHub
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python forex_bot.py
+
+      - name: Commit updated state file
+        run: |
+          git config user.name "forex-bot"
+          git config user.email "forex-bot@users.noreply.github.com"
+          git add last_signals.json || true
+          git diff --cached --quiet || git commit -m "update signal state"
+          git push || true
