@@ -1,17 +1,22 @@
 """
-Forex Price-Action Signal Bot — v5
+Forex Price-Action Signal Bot — v6
 
 Специфікація трейдера:
   M30: локальний тренд за структурою останніх STRUCTURE_LOOKBACK (20-30)
        свічок; глобальний (EMA200) має співпадати з локальним, інакше пропуск.
        У консолідації ("болоті") сигнали не формуються.
   M5:  локальний імпульс ділиться на зони-подушки за бічним обсягом
-       (наближення VRVP: обсяг свічки розподіляється по цінових комірках).
+       (наближення VRVP). v6: зони будуються СЕГМЕНТАЦІЄЮ ПРОФІЛЮ ПО
+       ДОЛИНАХ (LVN): долина = комірка з обсягом < VALLEY_FRACTION від
+       максимуму профілю; між долинами лежать вузли (HVN). Зони
+       неперетинні за побудовою — ланцюгове злиття у "велетенську зону"
+       неможливе. Занадто широкий сегмент ріжеться по найслабших
+       внутрішніх комірках (ширина <= MAX_ZONE_WIDTH_PCT).
        Обсяг зони = "стіна": якщо закрита свічка опинилась ЗА зоною —
        стіна пробита, зона не працює. Пробій зони POC = злом:
        пара покидається на ABANDON_MIN хвилин.
   Драбина входів:
-       Зона 1 = перший ретест після пробиття (найслабша) — 5 хв;
+       Зона 1 = перший ретест після пробиття (найближча до краю імпульсу) — 5 хв;
        Зона 2 = зона з дотиками свічок З ОБОХ боків (підтримка+опір) — 5 хв;
        Зона 3 = POC (найсильніша) — 10 хв, ОСТАННІЙ вхід на парі
        в цьому імпульсі (далі пара мовчить до нового імпульсу).
@@ -56,20 +61,19 @@ BETWEEN_PAIRS_SLEEP_SEC = 1.0
 OUT_OF_WINDOW_SLEEP_SEC = 300
 MAX_SIGNALS_PER_RUN = 2
 
-# --- Тренд M30 (спека: локальний 20-30 свічок + узгодженість з глобальним) ---
+# --- Тренд M30 (локальний 20-30 свічок + узгодженість з глобальним) ---
 TREND_EMA_PERIOD = 200
 STRUCTURE_LOOKBACK = 24            # 20-30 свічок M30 за спекою трейдера
 REQUIRE_GLOBAL_AGREEMENT = True    # глобальний (EMA200) мусить збігатись з локальним
 EFFICIENCY_MIN = 0.25              # нижче = флет/"пила"
 NET_MOVE_ATR_MIN = 2.0             # чистий зсув за вікно >= 2 ATR
 
-# --- Зони M5 (вузли обсягу, як VRVP) ---
+# --- Зони M5 (вузли обсягу, сегментація по долинах) ---
 POC_ZONES = 30
 TOLERANCE_PCT = 0.00015            # буфер на межах зони для факту "входу"
 IMPULSE_LOOKBACK_5M = 150
-PEAK_MIN_REL = 0.50                # пік обсягу: комірка >= 50% від макс. комірки
-VALLEY_FRACTION = 0.35             # розширення піка, поки сусіди >= 35% обсягу піка
-MAX_ZONE_WIDTH_PCT = 0.002         # зона не ширша за 0.2% (ширше = виродження)
+VALLEY_FRACTION = 0.35             # долина = комірка з обсягом < 35% від макс. профілю
+MAX_ZONE_WIDTH_PCT = 0.002         # зона не ширша за 0.2% (ширше = ріжемо по LVN)
 MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1                  # мін. дотиків З КОЖНОГО боку для зони 2
 MIN_WICK_RATIO = 0.35
@@ -197,7 +201,7 @@ def analyze_trend_30m(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# ЗОНИ M5: вузли обсягу (HVN) + дотики з обох боків
+# ЗОНИ M5: профіль обсягу + сегментація по долинах (v6)
 # ---------------------------------------------------------------------------
 def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
     """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}.
@@ -232,9 +236,27 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
     return cells
 
 
+def split_wide_segment(idx, vols, cells, cap_pct):
+    """Рекурсивно розрізає занадто широкий сегмент у точці найменшого
+    обсягу всередині (LVN-межа), поки шматки не вкладуться в cap_pct."""
+    lo_i, hi_i = idx[0], idx[-1]
+    width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / cells[hi_i]["hi"]
+    if width <= cap_pct or len(idx) <= 2:
+        return [idx]
+    interior = idx[1:-1]
+    m = min(interior, key=lambda k: vols[k])
+    left = [k for k in idx if k <= m]
+    right = [k for k in idx if k > m]
+    return (split_wide_segment(left, vols, cells, cap_pct)
+            + split_wide_segment(right, vols, cells, cap_pct))
+
+
 def build_volume_zones(cells):
-    """Зони = вузли високого обсягу: пік + сусіди >= VALLEY_FRACTION від піка,
-    ширина <= MAX_ZONE_WIDTH_PCT. LVN-комірки = межі зон."""
+    """Зони = вузли високого обсягу (HVN), розділені долинами малого
+    обсягу (LVN), як у TradingView VRVP.
+    Долина = комірка з обсягом < VALLEY_FRACTION від максимуму профілю.
+    Зони НЕ перетинаються за побудовою (ланцюгове злиття неможливе).
+    Занадто широкий сегмент ріжеться по найслабших внутрішніх комірках."""
     vols = [c["vol"] for c in cells]
     total = sum(vols)
     if total <= 0:
@@ -243,45 +265,34 @@ def build_volume_zones(cells):
     if max_vol <= 0:
         return []
     n = len(cells)
-    peaks = []
-    for i in range(n):
-        if vols[i] < PEAK_MIN_REL * max_vol:
-            continue
-        left = vols[i - 1] if i > 0 else -1.0
-        right = vols[i + 1] if i < n - 1 else -1.0
-        if vols[i] >= left and vols[i] >= right:
-            peaks.append(i)
+    is_valley = [vols[i] < VALLEY_FRACTION * max_vol for i in range(n)]
     zones = []
-    for p in peaks:
-        lo_i, hi_i = p, p
-        while (lo_i - 1 >= 0
-               and vols[lo_i - 1] >= VALLEY_FRACTION * vols[p]
-               and (cells[p]["hi"] - cells[lo_i - 1]["lo"]) / cells[p]["hi"] <= MAX_ZONE_WIDTH_PCT):
-            lo_i -= 1
-        while (hi_i + 1 < n
-               and vols[hi_i + 1] >= VALLEY_FRACTION * vols[p]
-               and (cells[hi_i + 1]["hi"] - cells[p]["lo"]) / cells[p]["lo"] <= MAX_ZONE_WIDTH_PCT):
-            hi_i += 1
-        zone_vol = sum(vols[lo_i:hi_i + 1])
-        zones.append({
-            "lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
-            "touches": sum(cells[i]["touches"] for i in range(lo_i, hi_i + 1)),
-            "above": sum(cells[i]["above"] for i in range(lo_i, hi_i + 1)),
-            "below": sum(cells[i]["below"] for i in range(lo_i, hi_i + 1)),
-            "share": zone_vol / total,
-        })
-    zones.sort(key=lambda z: z["lo"])
-    merged = []
-    for z in zones:
-        if merged and z["lo"] <= merged[-1]["hi"]:
-            merged[-1]["hi"] = max(merged[-1]["hi"], z["hi"])
-            merged[-1]["touches"] += z["touches"]
-            merged[-1]["above"] += z["above"]
-            merged[-1]["below"] += z["below"]
-            merged[-1]["share"] += z["share"]
+    i = 0
+    while i < n:
+        if is_valley[i] or vols[i] <= 0:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and vols[j + 1] > 0 and not is_valley[j + 1]:
+            j += 1
+        seg = list(range(i, j + 1))
+        width = (cells[j]["hi"] - cells[i]["lo"]) / cells[j]["hi"]
+        if width > MAX_ZONE_WIDTH_PCT:
+            pieces = split_wide_segment(seg, vols, cells, MAX_ZONE_WIDTH_PCT)
         else:
-            merged.append(dict(z))
-    return merged
+            pieces = [seg]
+        for piece in pieces:
+            lo_i, hi_i = piece[0], piece[-1]
+            zone_vol = sum(vols[k] for k in piece)
+            zones.append({
+                "lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
+                "touches": sum(cells[k]["touches"] for k in piece),
+                "above": sum(cells[k]["above"] for k in piece),
+                "below": sum(cells[k]["below"] for k in piece),
+                "share": zone_vol / total,
+            })
+        i = j + 1
+    return zones
 
 
 def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
