@@ -53,7 +53,13 @@ WORK_END = dtime(20, 0)
 TREND_EMA_PERIOD = 200          # EMA на 30m для визначення тренду
 # Який метод фактично використовується для сигналів: "ema200" | "ema50" | "structure".
 # Усі три рахуються й логуються щоразу для порівняння, незалежно від обраного.
-TREND_METHOD = "ema200"
+TREND_METHOD = "structure"      # змінено з "ema200" — EMA200 занадто повільно
+                                 # реагує на локальний розворот (підтверджено
+                                 # прикладом AUDCHF/AUDUSD, де EMA200 давав
+                                 # SELL, хоч реальний локальний тренд вже BUY)
+STRUCTURE_LOOKBACK = 40         # скільки 30m свічок аналізує структурний метод
+                                 # (40 свічок ≈ 20 годин) — можна зменшити, щоб
+                                 # реагувати ще швидше на недавній розворот
 POC_ZONES = 30                  # на скільки цінових зон ділимо діапазон
 TOLERANCE_PCT = 0.00015         # ~0.015% — наскільки близько ціна має підійти (звужено)
 IMPULSE_LOOKBACK_5M = 150       # ширша історія 5m, щоб ловити "старі" рівні
@@ -130,7 +136,7 @@ def trend_by_ema(df: pd.DataFrame, period: int) -> str | None:
     return "BUY" if df["Close"].iloc[-1] > ema.iloc[-1] else "SELL"
 
 
-def trend_by_structure(df: pd.DataFrame, lookback: int = 40) -> str | None:
+def trend_by_structure(df: pd.DataFrame, lookback: int = STRUCTURE_LOOKBACK) -> str | None:
     """Визначає тренд за структурою (вищі/нижчі максимуми й мінімуми),
     без лагу EMA: ділить останні `lookback` свічок навпіл і порівнює
     high/low першої половини з другою. Ближче до того, як людина
