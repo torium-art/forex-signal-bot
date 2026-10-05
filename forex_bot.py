@@ -1,25 +1,25 @@
 """
-Forex Price-Action Signal Bot — v3
+Forex Price-Action Signal Bot — v5
 
-Головна відмінність від v2: рівні входу — це ЗОНИ (цінові діапазони [lo, hi]),
-як їх позначає трейдер на графіку, а не тонкі лінії. Зона працює як підтримка,
-коли ціна заходить у неї зверху (BUY), і як опір — коли знизу (SELL).
-Сигнал = ціна всередині зони + вхід з боку відкату + реакція (відбійна тінь
-на ЗАКРИТІЙ свічці 5m).
+Специфікація трейдера:
+  M30: локальний тренд за структурою останніх STRUCTURE_LOOKBACK (20-30)
+       свічок; глобальний (EMA200) має співпадати з локальним, інакше пропуск.
+       У консолідації ("болоті") сигнали не формуються.
+  M5:  локальний імпульс ділиться на зони-подушки за бічним обсягом
+       (наближення VRVP: обсяг свічки розподіляється по цінових комірках).
+       Обсяг зони = "стіна": якщо закрита свічка опинилась ЗА зоною —
+       стіна пробита, зона не працює. Пробій зони POC = злом:
+       пара покидається на ABANDON_MIN хвилин.
+  Драбина входів:
+       Зона 1 = перший ретест після пробиття (найслабша) — 5 хв;
+       Зона 2 = зона з дотиками свічок З ОБОХ боків (підтримка+опір) — 5 хв;
+       Зона 3 = POC (найсильніша) — 10 хв, ОСТАННІЙ вхід на парі
+       в цьому імпульсі (далі пара мовчить до нового імпульсу).
+  Сигнал = ціна всередині зони + вхід з боку відкату + відбійна тінь
+  на ЗАКРИТІЙ свічці 5m. За прогін <= MAX_SIGNALS_PER_RUN сигналів.
 
-Логіка загалом:
-  M30: чіткий тренд (локальний структурний АБО глобальний EMA200).
-       У консолідації сигнали НЕ формуються. Конфлікт локального і
-       глобального напрямку = невизначеність = пропуск.
-  M5:  імпульс -> зони горизонтального обсягу (наближення VRVP: обсяг свічки
-       розподіляється по цінових зонах, які перекриває її High-Low).
-       POC = зона з максимальним обсягом.
-       Драбина: зона 1 (1-й дотик, 5 хв), зона 2 (глибше, 5 хв),
-       POC (10 хв).
-  За прогін <= MAX_SIGNALS_PER_RUN сигналів, найкращі за score.
-
-Режими (змінна RUN_MODE): once (GitHub Actions) | loop (VPS/ПК).
-Журнал: signals_journal.csv, результати: outcomes_journal.csv (loop).
+Режими (RUN_MODE): once (GitHub Actions) | loop (VPS/ПК).
+Журнал: signals_journal.csv; результати: outcomes_journal.csv (loop).
 """
 import csv
 import json
@@ -56,28 +56,32 @@ BETWEEN_PAIRS_SLEEP_SEC = 1.0
 OUT_OF_WINDOW_SLEEP_SEC = 300
 MAX_SIGNALS_PER_RUN = 2
 
-# --- Тренд M30 ---
+# --- Тренд M30 (спека: локальний 20-30 свічок + узгодженість з глобальним) ---
 TREND_EMA_PERIOD = 200
-STRUCTURE_LOOKBACK = 40
-EFFICIENCY_MIN = 0.25            # нижче = флет/"пила"
-NET_MOVE_ATR_MIN = 2.0           # чистий зсув за вікно >= 2 ATR
-GLOBAL_DIST_ATR = 1.0            # глобальний тренд чіткий, якщо ціна >= 1 ATR від EMA200
+STRUCTURE_LOOKBACK = 24            # 20-30 свічок M30 за спекою трейдера
+REQUIRE_GLOBAL_AGREEMENT = True    # глобальний (EMA200) мусить збігатись з локальним
+EFFICIENCY_MIN = 0.25              # нижче = флет/"пила"
+NET_MOVE_ATR_MIN = 2.0             # чистий зсув за вікно >= 2 ATR
 
-# --- Зони M5 ---
+# --- Зони M5 (вузли обсягу, як VRVP) ---
 POC_ZONES = 30
-TOLERANCE_PCT = 0.00015          # буфер на межах зони для факту "входу"
+TOLERANCE_PCT = 0.00015            # буфер на межах зони для факту "входу"
 IMPULSE_LOOKBACK_5M = 150
-ZONE_MERGE_PCT = 0.0015          # зони з проміжком < 0.15% зливаються в одну смугу
+PEAK_MIN_REL = 0.50                # пік обсягу: комірка >= 50% від макс. комірки
+VALLEY_FRACTION = 0.35             # розширення піка, поки сусіди >= 35% обсягу піка
+MAX_ZONE_WIDTH_PCT = 0.002         # зона не ширша за 0.2% (ширше = виродження)
 MIN_ZONE_TOUCHES = 4
+MIN_TWO_SIDED = 1                  # мін. дотиків З КОЖНОГО боку для зони 2
 MIN_WICK_RATIO = 0.35
-EXTREME_AGE_MIN = 2              # екстремум імпульсу >= 2 свічок тому (відкат почався)
+EXTREME_AGE_MIN = 2                # екстремум імпульсу >= 2 свічок тому (відкат почався)
 
-# --- Сигнали ---
+# --- Сигнали / стіни ---
 SIGNAL_COOLDOWN_MIN = 20
 BREAKOUT_RANGE_MULT = 1.8
 BREAKOUT_LOOKBACK = 20
-LEVEL_EXPIRY_BASE_MIN = 5        # зони 1-2
-LEVEL_EXPIRY_POC_MIN = 10        # POC
+LEVEL_EXPIRY_BASE_MIN = 5          # зони 1-2
+LEVEL_EXPIRY_POC_MIN = 10          # POC (останній вхід)
+ABANDON_MIN = 60                   # покинути пару на N хв після пробою POC-зони
 
 # --- Новини ---
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -132,7 +136,7 @@ def fetch_candles(pair: str, interval: str, period: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# ТРЕНД M30 + ФІЛЬТР КОНСОЛІДАЦІЇ
+# ТРЕНД M30: локальний + узгодженість з глобальним + фільтр консолідації
 # ---------------------------------------------------------------------------
 def trend_by_ema(df: pd.DataFrame, period: int):
     if len(df) < period:
@@ -165,7 +169,8 @@ def efficiency_ratio(closes: pd.Series, lookback: int) -> float:
 
 
 def analyze_trend_30m(df: pd.DataFrame):
-    """Повертає (trend, source, er). None = консолідація/невизначеність."""
+    """(trend, source, er). Локальний тренд = структура 20-30 свічок;
+    глобальний = EMA200; торгуємо лише коли вони співпадають."""
     if len(df) < STRUCTURE_LOOKBACK + 1:
         return None, "мало даних 30m", 0.0
     atr = (df["High"] - df["Low"]).tail(14).mean()
@@ -180,36 +185,33 @@ def analyze_trend_30m(df: pd.DataFrame):
 
     net_dir = "BUY" if net > 0 else "SELL"
     structure = trend_by_structure(df)
-    if structure is not None and structure != net_dir:
-        structure = None
+    if structure is None or structure != net_dir:
+        return None, "немає чіткого локального тренда на 30m", er
 
-    ema_series = df["Close"].ewm(span=TREND_EMA_PERIOD, adjust=False).mean()
-    ema200 = "BUY" if df["Close"].iloc[-1] > ema_series.iloc[-1] else "SELL"
-    dist = abs(df["Close"].iloc[-1] - ema_series.iloc[-1])
-    global_clear = len(df) >= TREND_EMA_PERIOD and dist >= GLOBAL_DIST_ATR * atr
-
-    if structure is not None:
-        if global_clear and structure != ema200:
-            return None, "невизначеність: локальний супроти глобального", er
-        return structure, "structure", er
-    if global_clear:
-        return ema200, "ema200", er
-    return None, "немає чіткого тренда", er
+    if REQUIRE_GLOBAL_AGREEMENT and len(df) >= TREND_EMA_PERIOD:
+        ema_last = df["Close"].ewm(span=TREND_EMA_PERIOD, adjust=False).mean().iloc[-1]
+        global_dir = "BUY" if df["Close"].iloc[-1] > ema_last else "SELL"
+        if global_dir != structure:
+            return None, "неузгодженість: локальний супроти глобального (EMA200)", er
+    return structure, "structure+EMA200", er
 
 
 # ---------------------------------------------------------------------------
-# ЗОНИ (v3: діапазони, а не лінії)
+# ЗОНИ M5: вузли обсягу (HVN) + дотики з обох боків
 # ---------------------------------------------------------------------------
-def compute_zones(window: pd.DataFrame, low: float, high: float):
-    """Наближення VRVP. Повертає список словників {lo, hi, touches, share}:
-    кожна сира зона — це смуга [lo, hi], обсяг свічки розподіляється по
-    смугах, які перекриває її High-Low."""
+def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
+    """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}.
+    above = дотики ЗВЕРХУ (Low свічки всередині комірки),
+    below = дотики ЗНИЗУ (High свічки всередині комірки)."""
     if high <= low:
         mid = (high + low) / 2
-        return [{"lo": mid, "hi": mid, "touches": 1, "share": 1.0}]
+        return [{"lo": mid, "hi": mid, "vol": 1.0, "touches": 1,
+                 "above": 1, "below": 1}]
     zone_size = (high - low) / POC_ZONES
     touches = [0] * POC_ZONES
     vol = [0.0] * POC_ZONES
+    above = [0] * POC_ZONES
+    below = [0] * POC_ZONES
     has_vol = "Volume" in window.columns and window["Volume"].sum() > 0
     for _, row in window.iterrows():
         z_lo = max(0, min(POC_ZONES - 1, int((row["Low"] - low) / zone_size)))
@@ -219,67 +221,102 @@ def compute_zones(window: pd.DataFrame, low: float, high: float):
         for z in range(z_lo, z_hi + 1):
             touches[z] += 1
             vol[z] += v
-    total = sum(vol) or 1.0
-    zones = []
+        above[z_lo] += 1   # low свічки зайшов у комірку зверху
+        below[z_hi] += 1   # high свічки зайшов у комірку знизу
+    cells = []
     for i in range(POC_ZONES):
-        if touches[i] > 0:
-            zones.append({"lo": low + zone_size * i,
-                          "hi": low + zone_size * (i + 1),
-                          "touches": touches[i],
-                          "share": vol[i] / total})
-    return zones
+        cells.append({"lo": low + zone_size * i,
+                      "hi": low + zone_size * (i + 1),
+                      "vol": vol[i], "touches": touches[i],
+                      "above": above[i], "below": below[i]})
+    return cells
 
 
-def merge_zone_bands(zones):
-    """Зливає сусідні смуги в одну ЗОНУ, якщо проміжок між ними малий
-    (або вони суміжні) — як прямокутник на графіку трейдера."""
-    if not zones:
+def build_volume_zones(cells):
+    """Зони = вузли високого обсягу: пік + сусіди >= VALLEY_FRACTION від піка,
+    ширина <= MAX_ZONE_WIDTH_PCT. LVN-комірки = межі зон."""
+    vols = [c["vol"] for c in cells]
+    total = sum(vols)
+    if total <= 0:
         return []
-    zs = sorted(zones, key=lambda z: z["lo"])
-    merged = [dict(zs[0])]
-    for z in zs[1:]:
-        cur = merged[-1]
-        if z["lo"] <= cur["hi"] * (1 + ZONE_MERGE_PCT):
-            tot = cur["share"] + z["share"]
-            cur["hi"] = z["hi"]
-            cur["touches"] += z["touches"]
-            cur["share"] = tot
+    max_vol = max(vols)
+    if max_vol <= 0:
+        return []
+    n = len(cells)
+    peaks = []
+    for i in range(n):
+        if vols[i] < PEAK_MIN_REL * max_vol:
+            continue
+        left = vols[i - 1] if i > 0 else -1.0
+        right = vols[i + 1] if i < n - 1 else -1.0
+        if vols[i] >= left and vols[i] >= right:
+            peaks.append(i)
+    zones = []
+    for p in peaks:
+        lo_i, hi_i = p, p
+        while (lo_i - 1 >= 0
+               and vols[lo_i - 1] >= VALLEY_FRACTION * vols[p]
+               and (cells[p]["hi"] - cells[lo_i - 1]["lo"]) / cells[p]["hi"] <= MAX_ZONE_WIDTH_PCT):
+            lo_i -= 1
+        while (hi_i + 1 < n
+               and vols[hi_i + 1] >= VALLEY_FRACTION * vols[p]
+               and (cells[hi_i + 1]["hi"] - cells[p]["lo"]) / cells[p]["lo"] <= MAX_ZONE_WIDTH_PCT):
+            hi_i += 1
+        zone_vol = sum(vols[lo_i:hi_i + 1])
+        zones.append({
+            "lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
+            "touches": sum(cells[i]["touches"] for i in range(lo_i, hi_i + 1)),
+            "above": sum(cells[i]["above"] for i in range(lo_i, hi_i + 1)),
+            "below": sum(cells[i]["below"] for i in range(lo_i, hi_i + 1)),
+            "share": zone_vol / total,
+        })
+    zones.sort(key=lambda z: z["lo"])
+    merged = []
+    for z in zones:
+        if merged and z["lo"] <= merged[-1]["hi"]:
+            merged[-1]["hi"] = max(merged[-1]["hi"], z["hi"])
+            merged[-1]["touches"] += z["touches"]
+            merged[-1]["above"] += z["above"]
+            merged[-1]["below"] += z["below"]
+            merged[-1]["share"] += z["share"]
         else:
             merged.append(dict(z))
     return merged
 
 
+def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
+    return {"level": idx, "lo": z["lo"], "hi": z["hi"],
+            "center": (z["lo"] + z["hi"]) / 2, "strength": z["share"],
+            "above": z["above"], "below": z["below"], "is_poc": is_poc,
+            "expiry_min": LEVEL_EXPIRY_POC_MIN if is_poc else LEVEL_EXPIRY_BASE_MIN}
+
+
 def build_entry_ladder(window: pd.DataFrame, low: float, high: float, trend: str):
-    """Драбина входів із ЗОН: 1 = перша на шляху відкату, 2 = глибша,
-    остання = POC (зона з макс. обсягом)."""
-    zones = merge_zone_bands(compute_zones(window, low, high))
-    zones = [z for z in zones if z["touches"] >= MIN_ZONE_TOUCHES]
+    """Драбина за спекою: зона 1 = перший ретест (найближча до краю імпульсу),
+    зона 2 = зона з дотиками з обох боків, зона 3 = POC (найсильніша)."""
+    cells = compute_volume_profile(window, low, high)
+    zones = [z for z in build_volume_zones(cells) if z["touches"] >= MIN_ZONE_TOUCHES]
     if not zones:
         return []
-    by_strength = sorted(zones, key=lambda z: z["share"], reverse=True)
-    poc = by_strength[0]
+    poc = max(zones, key=lambda z: z["share"])
     poc_c = (poc["lo"] + poc["hi"]) / 2
     edge = high if trend == "BUY" else low
-    others = by_strength[1:]
+    others = [z for z in zones if z is not poc]
     if trend == "BUY":
-        cands = [z for z in others if poc_c <= (z["lo"] + z["hi"]) / 2 <= edge]
-        cands.sort(key=lambda z: -(z["lo"] + z["hi"]) / 2)
+        path = [z for z in others if poc_c <= (z["lo"] + z["hi"]) / 2 <= edge]
+        path.sort(key=lambda z: -(z["lo"] + z["hi"]) / 2)
     else:
-        cands = [z for z in others if edge <= (z["lo"] + z["hi"]) / 2 <= poc_c]
-        cands.sort(key=lambda z: (z["lo"] + z["hi"]) / 2)
+        path = [z for z in others if edge <= (z["lo"] + z["hi"]) / 2 <= poc_c]
+        path.sort(key=lambda z: (z["lo"] + z["hi"]) / 2)
 
     ladder = []
-    for idx, z in enumerate(cands[:2] + [poc], start=1):
-        is_poc = z is poc
-        ladder.append({
-            "level": idx,
-            "lo": z["lo"],
-            "hi": z["hi"],
-            "center": (z["lo"] + z["hi"]) / 2,
-            "strength": z["share"],
-            "is_poc": is_poc,
-            "expiry_min": LEVEL_EXPIRY_POC_MIN if is_poc else LEVEL_EXPIRY_BASE_MIN,
-        })
+    if path:
+        ladder.append(_mk_level(len(ladder) + 1, path[0], False))     # зона 1
+        two_sided = [z for z in path[1:]
+                     if z["above"] >= MIN_TWO_SIDED and z["below"] >= MIN_TWO_SIDED]
+        if two_sided:
+            ladder.append(_mk_level(len(ladder) + 1, two_sided[0], False))  # зона 2
+    ladder.append(_mk_level(len(ladder) + 1, poc, True))              # зона 3 = POC
     return ladder
 
 
@@ -297,24 +334,31 @@ def extreme_age(window: pd.DataFrame, trend: str) -> int:
 
 
 def in_zone(price: float, zone: dict) -> bool:
-    """Ціна всередині зони (з малим буфером на межах)."""
     return zone["lo"] * (1 - TOLERANCE_PCT) <= price <= zone["hi"] * (1 + TOLERANCE_PCT)
 
 
 def approach_ok(df5: pd.DataFrame, zone: dict, trend: str) -> bool:
-    """Ціна має ЗАЙТИ в зону з боку відкату: BUY — зверху (нещодавні хай
-    вищі за верх зони), SELL — знизу (нещодавні лоу нижчі за низ зони).
-    Це і є робота зони як підтримки/опору залежно від боку підходу."""
+    """Вхід у зону з боку відкату: BUY — зверху, SELL — знизу."""
     if len(df5) < 4:
         return False
-    recent = df5.iloc[-4:-1]  # три останні закриті свічки
+    recent = df5.iloc[-4:-1]
     if trend == "BUY":
         return recent["High"].max() >= zone["hi"]
     return recent["Low"].min() <= zone["lo"]
 
 
+def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
+    """'Стіна' пробита: закрита свічка 5m ЗА зоною. BUY: закриття нижче низу
+    зони (підтримку зламано). SELL: закриття вище верху зони (опір зламано)."""
+    if len(df5) < 2:
+        return False
+    c = df5.iloc[-2]
+    if trend == "BUY":
+        return c["Close"] < zone["lo"] * (1 - TOLERANCE_PCT)
+    return c["Close"] > zone["hi"] * (1 + TOLERANCE_PCT)
+
+
 def is_reaction_candle(df5: pd.DataFrame, trend: str) -> bool:
-    """Реакція на ОСТАННІЙ ЗАКРИТІЙ свічці 5m: довга відбійна тінь."""
     if len(df5) < 2:
         return False
     c = df5.iloc[-2]
@@ -382,9 +426,10 @@ def format_signal(pair: str, trend: str, price: float, level: dict,
     clean_pair = pair.replace("=X", "")
     direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
     if level["is_poc"]:
-        level_label = "POC (макс. обсяг)"
+        level_label = "Зона 3 / POC (найсильніша, ОСТАННІЙ вхід)"
     else:
-        level_label = {1: "Зона 1 (1-й дотик)", 2: "Зона 2 (глибше)"}.get(
+        level_label = {1: "Зона 1 (перший ретест після пробиття)",
+                       2: "Зона 2 (дотики з обох боків: підтримка+опір)"}.get(
             level["level"], f"Зона {level['level']}")
     side = "підтримка (вхід зверху)" if trend == "BUY" else "опір (вхід знизу)"
     warning = ""
@@ -520,9 +565,28 @@ def evaluate_pair(pair: str, state: dict, news_events):
         print(f"{pair}: імпульс ще свіжий, відкат не почався")
         return None
 
+    # пара покинута після пробою зони ("злом")
+    if state.get(f"{pair}_abandon_until", 0) > time.time():
+        print(f"{pair}: пара покинула гру після пробою зони — чекаємо")
+        return None
+
     ladder = build_entry_ladder(window, low, high, trend)
     if not ladder:
         print(f"{pair}: не вдалось побудувати зони")
+        return None
+
+    # пробій POC-зони = злом: лишаємо пару
+    poc_zone = next(l for l in ladder if l["is_poc"])
+    if zone_broken(poc_zone, df5, trend):
+        state[f"{pair}_abandon_until"] = time.time() + ABANDON_MIN * 60
+        print(f"{pair}: зону POC пробито свічкою — можливий злом, "
+              f"лишаємо пару на {ABANDON_MIN} хв")
+        return None
+
+    # останній вхід (POC) у цьому імпульсі вже зроблено
+    sig = f"{low:.5f}|{high:.5f}"
+    if state.get(f"{pair}_done_sig") == sig:
+        print(f"{pair}: входи цього імпульсу завершено (POC був останнім)")
         return None
 
     current_price = float(df5["Close"].iloc[-1])
@@ -534,6 +598,9 @@ def evaluate_pair(pair: str, state: dict, news_events):
 
     candidate = None
     for level in ladder:
+        if zone_broken(level, df5, trend):
+            print(f"{pair}: зону {level['level']} пробито — стіна не спрацювала, пропуск")
+            continue
         if not in_zone(current_price, level):
             continue
         if not approach_ok(df5, level, trend):
@@ -559,7 +626,8 @@ def evaluate_pair(pair: str, state: dict, news_events):
                       + (15 if level["is_poc"] else 0) + 25 * clarity, 1)
         candidate = {"pair": pair, "trend": trend, "source": source,
                      "er": round(er, 3), "level": level, "entry": current_price,
-                     "score": score, "breakout": breakout, "signal_key": signal_key}
+                     "score": score, "breakout": breakout,
+                     "signal_key": signal_key, "sig": sig}
         break
 
     if candidate is None:
@@ -597,6 +665,8 @@ def run_cycle(state: dict) -> None:
             send_telegram_message(msg)
             state[cand["signal_key"]] = True
             mark_signal_sent(state, cand["pair"])
+            if lvl["is_poc"]:
+                state[f"{cand['pair']}_done_sig"] = cand["sig"]  # POC = останній вхід
             state.setdefault("pending_outcomes", []).append({
                 "pair": cand["pair"], "dir": cand["trend"], "entry": cand["entry"],
                 "expiry_min": lvl["expiry_min"],
