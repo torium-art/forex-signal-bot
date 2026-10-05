@@ -51,6 +51,9 @@ WORK_START = dtime(10, 0)
 WORK_END = dtime(20, 0)
 
 TREND_EMA_PERIOD = 200          # EMA на 30m для визначення тренду
+# Який метод фактично використовується для сигналів: "ema200" | "ema50" | "structure".
+# Усі три рахуються й логуються щоразу для порівняння, незалежно від обраного.
+TREND_METHOD = "ema200"
 POC_ZONES = 30                  # на скільки цінових зон ділимо діапазон
 TOLERANCE_PCT = 0.00015         # ~0.015% — наскільки близько ціна має підійти (звужено)
 IMPULSE_LOOKBACK_5M = 150       # ширша історія 5m, щоб ловити "старі" рівні
@@ -58,6 +61,10 @@ ZONE_MERGE_PCT = 0.0015         # зони ближче ніж 0.15% одна д
 MIN_ZONE_TOUCHES = 4            # зона вважається рівнем, тільки якщо ціна
                                  # торкалась її мінімум стільки разів — слабші
                                  # зони (шум) до драбини входів не потрапляють
+MIN_WICK_RATIO = 0.35           # мінімальна частка "відбійної" тіні від усього
+                                 # діапазону свічки, щоб вважати це реакцією на рівень
+SIGNAL_COOLDOWN_MIN = 20        # мінімум хвилин між сигналами по одній парі,
+                                 # незалежно від того, скільки разів ціна підходила
 BREAKOUT_RANGE_MULT = 1.8       # свічка вважається "імпульсним пробоєм", якщо
                                  # її діапазон (High-Low) у стільки разів більший
                                  # за середній діапазон останніх свічок
@@ -69,7 +76,8 @@ LEVEL_LABELS = {1: "Основа", 2: "1-е перекриття", 3: "2-е пе
 
 # --- Економічний календар (Forex Factory, безкоштовно, без ключа) ---
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-NEWS_BEFORE_MIN = 15            # за скільки хвилин ДО новини попереджати
+NEWS_BEFORE_MIN = 25            # за скільки хвилин ДО новини попереджати (з запасом
+                                 # на можливу затримку запуску GitHub Actions)
 NEWS_AFTER_MIN = 20             # скільки хвилин ПІСЛЯ новини ще не торгувати
 # Валюти, які цікавлять (витягуються з тікерів пар автоматично, це просто мапа
 # ISO-коду з календаря на позначення в тікерах yfinance)
@@ -83,8 +91,10 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), "last_signals.json")
 
 
 def in_trading_window() -> bool:
-    now = datetime.now(TZ).time()
-    return WORK_START <= now <= WORK_END
+    now_dt = datetime.now(TZ)
+    if now_dt.weekday() >= 5:  # 5=субота, 6=неділя — форекс закритий
+        return False
+    return WORK_START <= now_dt.time() <= WORK_END
 
 
 def load_state() -> dict:
@@ -113,14 +123,59 @@ def fetch_candles(pair: str, interval: str, period: str) -> pd.DataFrame:
     return df
 
 
-def get_trend_30m(pair: str) -> str | None:
-    df = fetch_candles(pair, interval="30m", period="30d")
-    if len(df) < TREND_EMA_PERIOD:
+def trend_by_ema(df: pd.DataFrame, period: int) -> str | None:
+    if len(df) < period:
         return None
-    df["EMA"] = df["Close"].ewm(span=TREND_EMA_PERIOD, adjust=False).mean()
-    last_close = df["Close"].iloc[-1]
-    last_ema = df["EMA"].iloc[-1]
-    return "BUY" if last_close > last_ema else "SELL"
+    ema = df["Close"].ewm(span=period, adjust=False).mean()
+    return "BUY" if df["Close"].iloc[-1] > ema.iloc[-1] else "SELL"
+
+
+def trend_by_structure(df: pd.DataFrame, lookback: int = 40) -> str | None:
+    """Визначає тренд за структурою (вищі/нижчі максимуми й мінімуми),
+    без лагу EMA: ділить останні `lookback` свічок навпіл і порівнює
+    high/low першої половини з другою. Ближче до того, як людина
+    визначає тренд візуально — реагує на недавній розворот швидше."""
+    if len(df) < lookback:
+        return None
+    window = df.tail(lookback)
+    half = lookback // 2
+    first_half, second_half = window.iloc[:half], window.iloc[half:]
+
+    first_high, first_low = first_half["High"].max(), first_half["Low"].min()
+    second_high, second_low = second_half["High"].max(), second_half["Low"].min()
+
+    higher_high = second_high > first_high
+    higher_low = second_low > first_low
+    lower_high = second_high < first_high
+    lower_low = second_low < first_low
+
+    if higher_high and higher_low:
+        return "BUY"
+    if lower_high and lower_low:
+        return "SELL"
+    return None  # структура неоднозначна (флет/перехідна фаза)
+
+
+def get_trend_30m(pair: str) -> str | None:
+    """Головний тренд для сигналів — поки що лишається на EMA200 (перевірено
+    раніше), але паралельно рахує й логує EMA50 та структурний метод для
+    порівняння. Коли назбирається достатньо спостережень — можна буде
+    переключити TREND_METHOD нижче на інший підхід."""
+    df = fetch_candles(pair, interval="30m", period="30d")
+    if df.empty:
+        return None
+
+    trend_ema200 = trend_by_ema(df, TREND_EMA_PERIOD)
+    trend_ema50 = trend_by_ema(df, 50)
+    trend_structure = trend_by_structure(df)
+
+    print(
+        f"{pair}: [порівняння трендів] EMA200={trend_ema200}, "
+        f"EMA50={trend_ema50}, Структура={trend_structure}"
+    )
+
+    methods = {"ema200": trend_ema200, "ema50": trend_ema50, "structure": trend_structure}
+    return methods.get(TREND_METHOD, trend_ema200)
 
 
 def find_last_impulse(df: pd.DataFrame):
@@ -220,6 +275,42 @@ def close_enough(price: float, target: float) -> bool:
     return abs(price - target) / target <= TOLERANCE_PCT
 
 
+def is_reaction_candle(df5: pd.DataFrame, trend: str) -> bool:
+    """Перевіряє, чи остання свічка показує реальний відбій від рівня:
+    довга тінь у протилежний від входу бік (ціну 'відштовхнуло'), а не просто
+    прохід повз. Для BUY — довга нижня тінь, для SELL — довга верхня."""
+    last = df5.iloc[-1]
+    rng = last["High"] - last["Low"]
+    if rng <= 0:
+        return False
+
+    if trend == "BUY":
+        wick = min(last["Open"], last["Close"]) - last["Low"]
+    else:
+        wick = last["High"] - max(last["Open"], last["Close"])
+
+    return (wick / rng) >= MIN_WICK_RATIO
+
+
+def cooldown_active(state: dict, pair: str) -> bool:
+    """Перевіряє, чи не минуло ще SIGNAL_COOLDOWN_MIN хвилин з останнього
+    сигналу по цій парі — незалежно від рівня чи напрямку."""
+    key = f"{pair}_last_signal_at"
+    last_str = state.get(key)
+    if not last_str:
+        return False
+    try:
+        last_dt = datetime.strptime(last_str, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+    except Exception:
+        return False
+    elapsed_min = (datetime.now(TZ) - last_dt).total_seconds() / 60
+    return elapsed_min < SIGNAL_COOLDOWN_MIN
+
+
+def mark_signal_sent(state: dict, pair: str) -> None:
+    state[f"{pair}_last_signal_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+
+
 def is_impulsive_breakout(df5: pd.DataFrame, trend: str) -> bool:
     """Перевіряє, чи остання свічка (і при потребі одна-дві перед нею)
     'пробиває рівень як ніж масло': діапазон значно більший за середній,
@@ -252,6 +343,13 @@ def is_impulsive_breakout(df5: pd.DataFrame, trend: str) -> bool:
 
 
 def send_telegram_message(html_text: str) -> None:
+    # повторна перевірка торгового вікна прямо перед відправкою — якщо прогін
+    # стартував ще в межах 10:00-20:00, а аналіз усіх пар зайняв кілька
+    # хвилин і час вже вийшов за межі вікна, повідомлення не йде
+    if not in_trading_window():
+        print("[Telegram] пропущено — час вийшов за межі торгового вікна")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -383,8 +481,20 @@ def check_pair(pair: str, state: dict, news_events: list[dict]) -> None:
     current_price = float(df5["Close"].iloc[-1])
     breakout = is_impulsive_breakout(df5, trend)
 
+    # кулдаун на всю пару — якщо нещодавно вже був сигнал, нічого не шлемо,
+    # незалежно від рівня, щоб уникнути "залпів" по кілька сигналів поспіль
+    if cooldown_active(state, pair):
+        print(f"{pair}: кулдаун ще активний, сигнали пропущено")
+        return
+
     for level in ladder:
         if not close_enough(current_price, level["price"]):
+            continue
+
+        # вимагаємо реального відбою (довгу тінь у потрібний бік), а не
+        # просто "ціна опинилась поруч" — менше хибних сигналів
+        if not is_reaction_candle(df5, trend):
+            print(f"{pair}: рівень {level['level']} поруч, але немає підтвердження відбою")
             continue
 
         # якщо виявлено імпульсний пробій — перекриття (рівні 2 і 3) не
@@ -403,6 +513,7 @@ def check_pair(pair: str, state: dict, news_events: list[dict]) -> None:
         msg = format_signal(pair, trend, current_price, level, breakout)
         send_telegram_message(msg)
         state[signal_key] = True
+        mark_signal_sent(state, pair)
         print(f"{pair}: сигнал відправлено (рівень {level['level']}, пробій={breakout})")
         return  # один сигнал на пару за прогін
 
