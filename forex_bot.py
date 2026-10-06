@@ -1,5 +1,5 @@
-"""
-Forex Price-Action Signal Bot — v9
+ """
+Forex Price-Action Signal Bot — v10
 """
 import csv
 import json
@@ -212,7 +212,9 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
 
 def split_wide_segment(idx, vols, cells, cap_pct):
     lo_i, hi_i = idx[0], idx[-1]
-    width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / cells[hi_i]["hi"]
+    # FIX 5: захист від ділення на нуль
+    denom = cells[hi_i]["hi"] or 1.0
+    width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / denom
     if width <= cap_pct or len(idx) <= 2:
         return [idx]
     interior = idx[1:-1]
@@ -248,7 +250,9 @@ def build_volume_zones(cells):
         while j + 1 < n and raw[j + 1] > 0 and not is_valley[j + 1]:
             j += 1
         seg = list(range(i, j + 1))
-        width = (cells[j]["hi"] - cells[i]["lo"]) / cells[j]["hi"]
+        # FIX 5: захист від ділення на нуль
+        denom = cells[j]["hi"] or 1.0
+        width = (cells[j]["hi"] - cells[i]["lo"]) / denom
         if width > MAX_ZONE_WIDTH_PCT:
             pieces = split_wide_segment(seg, vols, cells, MAX_ZONE_WIDTH_PCT)
         else:
@@ -356,6 +360,9 @@ def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
     return c["Close"] > zone["hi"] * (1 + TOLERANCE_PCT)
 
 
+# FIX 8: is_reaction_candle більше не викликається у головному потоці.
+# Залишено як довідник — на випадок, якщо колись захочеш "м'яку" версію
+# (перевірку хвоста/тіла останньої закритої свічки).
 def is_reaction_candle(df5: pd.DataFrame, trend: str) -> bool:
     if len(df5) < 2:
         return False
@@ -405,27 +412,29 @@ def mark_signal_sent(state: dict, pair: str) -> None:
     state[f"{pair}_last_signal_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
 
 
-def send_telegram_message(html_text: str) -> None:
+# FIX 1: повертає bool — успіх/невдача надсилання
+def send_telegram_message(html_text: str) -> bool:
     if not in_trading_window():
         print("[Telegram] пропущено — поза торговим вікном")
-        return
+        return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": html_text,
                                     "parse_mode": "HTML"}, timeout=15)
     if resp.status_code != 200:
         print(f"[Telegram error] {resp.status_code}: {resp.text}")
+        return False
+    return True
 
 
 def format_signal(pair: str, trend: str, price: float, level: dict,
                   breakout: bool, source: str, score: float) -> str:
     clean_pair = pair.replace("=X", "")
     direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
+    # FIX 7: чисті, стабільні лейбли (не залежать від індексу)
     if level["is_poc"]:
-        level_label = "Зона 3 / POC (найсильніша, ОСТАННІЙ вхід)"
+        level_label = "🎯 POC (найсильніша зона, ОСТАННІЙ вхід)"
     else:
-        level_label = {1: "Зона 1 (перший ретест після пробиття)",
-                       2: "Зона 2 (дотики з обох боків: підтримка+опір)"}.get(
-            level["level"], f"Зона {level['level']}")
+        level_label = f"Рівень {level['level']} (ретест після пробою)"
     side = "підтримка (вхід зверху)" if trend == "BUY" else "опір (вхід знизу)"
     warning = ""
     if breakout:
@@ -515,6 +524,7 @@ def find_relevant_news_window(pair: str, events):
     return None
 
 
+# FIX 2: state сетиться тільки при успішному надсиланні
 def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
     clean_pair = pair.replace("=X", "")
     key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
@@ -525,8 +535,8 @@ def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
            f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
            f"Рекомендація: не торгувати ~{NEWS_BEFORE_MIN} хв до і "
            f"~{NEWS_AFTER_MIN} хв після виходу.")
-    send_telegram_message(msg)
-    state[key] = True
+    if send_telegram_message(msg):
+        state[key] = True
 
 
 def evaluate_pair(pair: str, state: dict, news_events):
@@ -605,12 +615,11 @@ def evaluate_pair(pair: str, state: dict, news_events):
         if not approach_ok(df5, level, trend):
             print(f"{pair}: ціна в зоні {level['level']}, але вхід не з боку відкату")
             continue
-        if not is_reaction_candle(df5, trend):
-            print(f"{pair}: ціна в зоні {level['level']}, немає підтвердження відбою")
-            continue
-        if breakout and level["level"] > 1:
-            print(f"{pair}: зона {level['level']} пропущена — імпульсний пробій")
-            continue
+        # FIX 8: прибрано обов'язкову перевірку is_reaction_candle —
+        # користувач входить одразу при дотику зони, не чекаючи закритої свічки.
+        # FIX 9: прибрано блок `if breakout and level > 1: continue` —
+        # за логікою користувача імпульсний пробій рівня 1 саме і є сигналом
+        # переходити на рівень 2, а не приводом пропустити його.
         signal_key = f"{pair}_{trend}_level{level['level']}"
         if state.get(signal_key, False):
             continue
@@ -630,9 +639,10 @@ def evaluate_pair(pair: str, state: dict, news_events):
         break
 
     if candidate is None:
+        # FIX 6: не залишаємо сміттєвих ключів state, просто видаляємо їх
         for level in ladder:
             if not in_zone(current_price, level):
-                state[f"{pair}_{trend}_level{level['level']}"] = False
+                state.pop(f"{pair}_{trend}_level{level['level']}", None)
         zones_str = [f"{l['lo']:.5f}-{l['hi']:.5f}" for l in ladder]
         print(f"{pair}: тренд={trend}({source}), ціна={current_price:.5f}, зони={zones_str}")
     return candidate
@@ -652,26 +662,41 @@ def run_cycle(state: dict) -> None:
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     sent_count = 0
+    # FIX 3: сигнал позначається відправленим і пишеться в pending_outcomes
+    # ТІЛЬКИ якщо Telegram реально прийняв повідомлення.
     for cand in candidates:
         lvl = cand["level"]
-        sent = sent_count < MAX_SIGNALS_PER_RUN
-        reason = "sent" if sent else "ліміт сигналів за прогін"
-        if sent:
+        allowed = sent_count < MAX_SIGNALS_PER_RUN
+        sent_ok = False
+        if allowed:
             msg = format_signal(cand["pair"], cand["trend"], cand["entry"],
                                 lvl, cand["breakout"], cand["source"], cand["score"])
-            send_telegram_message(msg)
-            state[cand["signal_key"]] = True
-            mark_signal_sent(state, cand["pair"])
-            if lvl["is_poc"]:
-                state[f"{cand['pair']}_done_sig"] = cand["sig"]
-            state.setdefault("pending_outcomes", []).append({
-                "pair": cand["pair"], "dir": cand["trend"], "entry": cand["entry"],
-                "expiry_min": lvl["expiry_min"],
-                "due_ts": time.time() + lvl["expiry_min"] * 60 + 90,
-            })
-            sent_count += 1
-            print(f"{cand['pair']}: сигнал відправлено "
-                  f"(зона {lvl['level']}, score={cand['score']})")
+            sent_ok = send_telegram_message(msg)
+            if sent_ok:
+                state[cand["signal_key"]] = True
+                mark_signal_sent(state, cand["pair"])
+                if lvl["is_poc"]:
+                    state[f"{cand['pair']}_done_sig"] = cand["sig"]
+                    # FIX 6: після POC-входу — чистимо прапорці рівнів цієї пари
+                    prefix = f"{cand['pair']}_{cand['trend']}_level"
+                    for k in [k for k in list(state.keys()) if k.startswith(prefix)]:
+                        state.pop(k, None)
+                state.setdefault("pending_outcomes", []).append({
+                    "pair": cand["pair"], "dir": cand["trend"], "entry": cand["entry"],
+                    "expiry_min": lvl["expiry_min"],
+                    "due_ts": time.time() + lvl["expiry_min"] * 60 + 90,
+                })
+                sent_count += 1
+                print(f"{cand['pair']}: сигнал відправлено "
+                      f"(зона {lvl['level']}, score={cand['score']})")
+            else:
+                print(f"{cand['pair']}: помилка надсилання — спробуємо наступного циклу")
+        if sent_ok:
+            reason = "sent"
+        elif allowed:
+            reason = "помилка надсилання"
+        else:
+            reason = "ліміт сигналів за прогін"
         journal_write({
             "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
             "pair": cand["pair"].replace("=X", ""),
@@ -685,11 +710,13 @@ def run_cycle(state: dict) -> None:
             "strength_pct": round(lvl["strength"] * 100, 1),
             "er": cand["er"],
             "trend_source": cand["source"],
-            "sent": sent,
+            "sent": sent_ok,
             "reason": reason,
         })
 
 
+# FIX 4: невдале отримання ціни більше не губить outcome.
+# Робимо до 5 повторів по хвилині; якщо не вдалось — пишемо UNKNOWN у журнал.
 def process_outcomes(state: dict) -> None:
     pending = state.get("pending_outcomes", [])
     if not pending:
@@ -700,7 +727,6 @@ def process_outcomes(state: dict) -> None:
         if o["due_ts"] > now_ts:
             still.append(o)
             continue
-        exit_price = None
         try:
             fi = yf.Ticker(o["pair"]).fast_info
             try:
@@ -708,7 +734,22 @@ def process_outcomes(state: dict) -> None:
             except Exception:
                 exit_price = float(fi["last_price"])
         except Exception as e:
-            print(f"[результат] не вдалось отримати ціну {o['pair']}: {e}")
+            retries = o.get("retries", 0) + 1
+            if retries < 5:
+                o["retries"] = retries
+                o["due_ts"] = now_ts + 60
+                still.append(o)
+                print(f"[результат] {o['pair']}: помилка ({e}), спроба {retries}/5")
+            else:
+                outcome_write({
+                    "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
+                    "pair": o["pair"].replace("=X", ""),
+                    "direction": o["dir"],
+                    "entry_price": round(o["entry"], 5),
+                    "exit_price": "",
+                    "result": "UNKNOWN",
+                })
+                print(f"[результат] {o['pair']}: не вдалось отримати ціну, записано UNKNOWN")
             continue
         win = (exit_price > o["entry"]) if o["dir"] == "BUY" else (exit_price < o["entry"])
         outcome_write({
