@@ -1,27 +1,31 @@
 """
-Forex Price-Action Signal Bot — v6
+Forex Price-Action Signal Bot — v7
 
-Специфікація трейдера:
-  M30: локальний тренд за структурою останніх STRUCTURE_LOOKBACK (20-30)
-       свічок; глобальний (EMA200) має співпадати з локальним, інакше пропуск.
-       У консолідації ("болоті") сигнали не формуються.
-  M5:  локальний імпульс ділиться на зони-подушки за бічним обсягом
-       (наближення VRVP). v6: зони будуються СЕГМЕНТАЦІЄЮ ПРОФІЛЮ ПО
-       ДОЛИНАХ (LVN): долина = комірка з обсягом < VALLEY_FRACTION від
-       максимуму профілю; між долинами лежать вузли (HVN). Зони
-       неперетинні за побудовою — ланцюгове злиття у "велетенську зону"
-       неможливе. Занадто широкий сегмент ріжеться по найслабших
-       внутрішніх комірках (ширина <= MAX_ZONE_WIDTH_PCT).
-       Обсяг зони = "стіна": якщо закрита свічка опинилась ЗА зоною —
-       стіна пробита, зона не працює. Пробій зони POC = злом:
-       пара покидається на ABANDON_MIN хвилин.
-  Драбина входів:
-       Зона 1 = перший ретест після пробиття (найближча до краю імпульсу) — 5 хв;
-       Зона 2 = зона з дотиками свічок З ОБОХ боків (підтримка+опір) — 5 хв;
-       Зона 3 = POC (найсильніша) — 10 хв, ОСТАННІЙ вхід на парі
-       в цьому імпульсі (далі пара мовчить до нового імпульсу).
-  Сигнал = ціна всередині зони + вхід з боку відкату + відбійна тінь
-  на ЗАКРИТІЙ свічці 5m. За прогін <= MAX_SIGNALS_PER_RUN сигналів.
+Зміни v7 (за результатами повної валідації 21 пари на 30m + M5-зон):
+  R1. Фільтр "болота" рахується по вікну 48 свічок 30m (24 год) — вікно,
+      що містить і імпульс, і відкат. Пауза в тренді більше не читається
+      як болото; справжні рейнджі (кілька розворотів за 24 год) лишаються
+      заблокованими. У рядок блокування додано діагностику (er, net*ATR).
+  R2. Напрямок: локальна структура 24 свічок -> середня структура 48 ->
+      EMA200 (якщо структура неоднозначна, а глобальний рух читабельний).
+  R3. Узгодженість з EMA200 лишається (якщо глобальний читанний:
+      ціна >= 1 ATR від EMA200).
+  Профіль зон M5 будується по PROFILE_LOOKBACK_5M=350 свічок (~29 год):
+      POC стає справжньою основою руху, свіжі вузли = рівні 1-2.
+  Фільтр поглинання: якщо ціна "живе" всередині зони (>= DWELL_MAX_CLOSES
+      закриттів з DWELL_LOOKBACK) — це консолідація, не сетап.
+  Анти-дубль: прапорець зони скидається ЛИШЕ коли ціна вийшла з зони
+      (один дотик = один сигнал).
+
+Специфікація трейдера (з v5-v6):
+  M30: тренд локальний+глобальний узгоджені; у болоті сигналів немає.
+  M5: зони-стіни за бічним обсягом (HVN, сегментація по долинах LVN);
+      пробій зони закритою свічкою = стіна впала; пробій POC = злом
+      (пара покидається на ABANDON_MIN хв).
+  Драбина: зона 1 = перший ретест (5 хв), зона 2 = двосторонні дотики
+      (5 хв), зона 3 = POC (10 хв, ОСТАННІЙ вхід імпульсу).
+  Сигнал = ціна в зоні + вхід з боку відкату + відбійна тінь на ЗАКРИТІЙ
+      свічці 5m. За прогін <= MAX_SIGNALS_PER_RUN сигналів (найкращі за score).
 
 Режими (RUN_MODE): once (GitHub Actions) | loop (VPS/ПК).
 Журнал: signals_journal.csv; результати: outcomes_journal.csv (loop).
@@ -61,23 +65,30 @@ BETWEEN_PAIRS_SLEEP_SEC = 1.0
 OUT_OF_WINDOW_SLEEP_SEC = 300
 MAX_SIGNALS_PER_RUN = 2
 
-# --- Тренд M30 (локальний 20-30 свічок + узгодженість з глобальним) ---
+# --- Тренд M30 (v7: три рівні напрямку +_gate по 48 свічках) ---
 TREND_EMA_PERIOD = 200
-STRUCTURE_LOOKBACK = 24            # 20-30 свічок M30 за спекою трейдера
-REQUIRE_GLOBAL_AGREEMENT = True    # глобальний (EMA200) мусить збігатись з локальним
+STRUCTURE_LOOKBACK = 24            # локальна структура (12 год)
+CONSOLIDATION_LOOKBACK = 48        # фільтр болота + середня структура (24 год)
+REQUIRE_GLOBAL_AGREEMENT = True    # узгодженість з EMA200, коли глобальний читанний
+GLOBAL_DIST_ATR = 1.0              # глобальний "читанний", якщо ціна >= 1 ATR від EMA200
 EFFICIENCY_MIN = 0.25              # нижче = флет/"пила"
-NET_MOVE_ATR_MIN = 2.0             # чистий зсув за вікно >= 2 ATR
+NET_MOVE_ATR_MIN = 2.0             # чистий зсув за 48 свічок >= 2 ATR
 
 # --- Зони M5 (вузли обсягу, сегментація по долинах) ---
 POC_ZONES = 30
 TOLERANCE_PCT = 0.00015            # буфер на межах зони для факту "входу"
-IMPULSE_LOOKBACK_5M = 150
+IMPULSE_LOOKBACK_5M = 150          # вікно імпульсу (край + свіжість)
+PROFILE_LOOKBACK_5M = 350          # v7: вікно профілю зон (~29 год)
 VALLEY_FRACTION = 0.35             # долина = комірка з обсягом < 35% від макс. профілю
 MAX_ZONE_WIDTH_PCT = 0.002         # зона не ширша за 0.2% (ширше = ріжемо по LVN)
 MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1                  # мін. дотиків З КОЖНОГО боку для зони 2
 MIN_WICK_RATIO = 0.35
 EXTREME_AGE_MIN = 2                # екстремум імпульсу >= 2 свічок тому (відкат почався)
+
+# --- Поглинання зони (v7) ---
+DWELL_LOOKBACK = 12                # скільки закритих свічок перевіряємо (~1 год)
+DWELL_MAX_CLOSES = 4               # максимум закриттів усередині зони, поки це "реакція"
 
 # --- Сигнали / стіни ---
 SIGNAL_COOLDOWN_MIN = 20
@@ -140,7 +151,7 @@ def fetch_candles(pair: str, interval: str, period: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# ТРЕНД M30: локальний + узгодженість з глобальним + фільтр консолідації
+# ТРЕНД M30 (v7: R1 gate 48, R2 напрямок 24->48->EMA200, R3 узгодженість)
 # ---------------------------------------------------------------------------
 def trend_by_ema(df: pd.DataFrame, period: int):
     if len(df) < period:
@@ -149,7 +160,7 @@ def trend_by_ema(df: pd.DataFrame, period: int):
     return "BUY" if df["Close"].iloc[-1] > ema.iloc[-1] else "SELL"
 
 
-def trend_by_structure(df: pd.DataFrame, lookback: int = STRUCTURE_LOOKBACK):
+def trend_by_structure(df: pd.DataFrame, lookback: int):
     if len(df) < lookback:
         return None
     window = df.tail(lookback)
@@ -173,40 +184,58 @@ def efficiency_ratio(closes: pd.Series, lookback: int) -> float:
 
 
 def analyze_trend_30m(df: pd.DataFrame):
-    """(trend, source, er). Локальний тренд = структура 20-30 свічок;
-    глобальний = EMA200; торгуємо лише коли вони співпадають."""
-    if len(df) < STRUCTURE_LOOKBACK + 1:
+    """(trend, source, er).
+    R1: болото-гейт по 48 свічках з діаностикою (er, net*ATR).
+    R2: напрямок = структура24 (узгоджена з net24) -> структура48
+        (узгоджена з net48) -> EMA200 (якщо читанна).
+    R3: узгодженість з EMA200, коли глобальний читанний (>= 1 ATR)."""
+    if len(df) < CONSOLIDATION_LOOKBACK + 1:
         return None, "мало даних 30m", 0.0
     atr = (df["High"] - df["Low"]).tail(14).mean()
     if atr <= 0:
         return None, "atr=0", 0.0
-    er = efficiency_ratio(df["Close"], STRUCTURE_LOOKBACK)
-    w = df.tail(STRUCTURE_LOOKBACK)
-    net = w["Close"].iloc[-1] - w["Close"].iloc[0]
 
-    if er < EFFICIENCY_MIN or abs(net) < NET_MOVE_ATR_MIN * atr:
-        return None, "консолідація на 30m", er
+    # R1: фільтр болота по великому вікну
+    er = efficiency_ratio(df["Close"], CONSOLIDATION_LOOKBACK)
+    w48 = df.tail(CONSOLIDATION_LOOKBACK)
+    net48 = w48["Close"].iloc[-1] - w48["Close"].iloc[0]
+    if er < EFFICIENCY_MIN or abs(net48) < NET_MOVE_ATR_MIN * atr:
+        return None, (f"консолідація на 30m (er={er:.2f}, "
+                      f"net={abs(net48) / atr:.1f}*ATR)"), er
 
-    net_dir = "BUY" if net > 0 else "SELL"
-    structure = trend_by_structure(df)
-    if structure is None or structure != net_dir:
-        return None, "немає чіткого локального тренда на 30m", er
+    # R2: напрямок
+    trend, source = None, None
+    w24 = df.tail(STRUCTURE_LOOKBACK)
+    net24 = w24["Close"].iloc[-1] - w24["Close"].iloc[0]
+    s24 = trend_by_structure(df, STRUCTURE_LOOKBACK)
+    if s24 is not None and s24 == ("BUY" if net24 > 0 else "SELL"):
+        trend, source = s24, "structure24"
+    if trend is None:
+        s48 = trend_by_structure(df, CONSOLIDATION_LOOKBACK)
+        if s48 is not None and s48 == ("BUY" if net48 > 0 else "SELL"):
+            trend, source = s48, "structure48"
 
-    if REQUIRE_GLOBAL_AGREEMENT and len(df) >= TREND_EMA_PERIOD:
-        ema_last = df["Close"].ewm(span=TREND_EMA_PERIOD, adjust=False).mean().iloc[-1]
-        global_dir = "BUY" if df["Close"].iloc[-1] > ema_last else "SELL"
-        if global_dir != structure:
-            return None, "неузгодженість: локальний супроти глобального (EMA200)", er
-    return structure, "structure+EMA200", er
+    ema_series = df["Close"].ewm(span=TREND_EMA_PERIOD, adjust=False).mean()
+    ema_dir = "BUY" if df["Close"].iloc[-1] > ema_series.iloc[-1] else "SELL"
+    dist = abs(df["Close"].iloc[-1] - ema_series.iloc[-1])
+    global_readable = len(df) >= TREND_EMA_PERIOD and dist >= GLOBAL_DIST_ATR * atr
+
+    if trend is None and global_readable:
+        trend, source = ema_dir, "ema200"
+    if trend is None:
+        return None, "немає чіткого тренда (структури 24/48 неоднозначні)", er
+
+    # R3: узгодженість з глобальним
+    if REQUIRE_GLOBAL_AGREEMENT and global_readable and trend != ema_dir:
+        return None, f"неузгодженість: {source} супроти глобального (EMA200)", er
+    return trend, source, er
 
 
 # ---------------------------------------------------------------------------
-# ЗОНИ M5: профіль обсягу + сегментація по долинах (v6)
+# ЗОНИ M5: профіль обсягу + сегментація по долинах (v6/v7)
 # ---------------------------------------------------------------------------
 def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
-    """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}.
-    above = дотики ЗВЕРХУ (Low свічки всередині комірки),
-    below = дотики ЗНИЗУ (High свічки всередині комірки)."""
+    """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}."""
     if high <= low:
         mid = (high + low) / 2
         return [{"lo": mid, "hi": mid, "vol": 1.0, "touches": 1,
@@ -237,8 +266,7 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
 
 
 def split_wide_segment(idx, vols, cells, cap_pct):
-    """Рекурсивно розрізає занадто широкий сегмент у точці найменшого
-    обсягу всередині (LVN-межа), поки шматки не вкладуться в cap_pct."""
+    """Рекурсивно ріже широкий сегмент у точці найменшого обсягу (LVN-межа)."""
     lo_i, hi_i = idx[0], idx[-1]
     width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / cells[hi_i]["hi"]
     if width <= cap_pct or len(idx) <= 2:
@@ -252,11 +280,7 @@ def split_wide_segment(idx, vols, cells, cap_pct):
 
 
 def build_volume_zones(cells):
-    """Зони = вузли високого обсягу (HVN), розділені долинами малого
-    обсягу (LVN), як у TradingView VRVP.
-    Долина = комірка з обсягом < VALLEY_FRACTION від максимуму профілю.
-    Зони НЕ перетинаються за побудовою (ланцюгове злиття неможливе).
-    Занадто широкий сегмент ріжеться по найслабших внутрішніх комірках."""
+    """Зони = вузли HVN, розділені долинами LVN; неперетинні за побудовою."""
     vols = [c["vol"] for c in cells]
     total = sum(vols)
     if total <= 0:
@@ -302,10 +326,12 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
             "expiry_min": LEVEL_EXPIRY_POC_MIN if is_poc else LEVEL_EXPIRY_BASE_MIN}
 
 
-def build_entry_ladder(window: pd.DataFrame, low: float, high: float, trend: str):
-    """Драбина за спекою: зона 1 = перший ретест (найближча до краю імпульсу),
-    зона 2 = зона з дотиками з обох боків, зона 3 = POC (найсильніша)."""
-    cells = compute_volume_profile(window, low, high)
+def build_entry_ladder(window_profile: pd.DataFrame, low: float, high: float,
+                       trend: str):
+    """Драбина: зона 1 = перший ретест (найближча до краю імпульсу),
+    зона 2 = двосторонні дотики, зона 3 = POC (профіль по PROFILE_LOOKBACK_5M,
+    тому POC = справжня основа руху, а свіжі вузли = рівні 1-2)."""
+    cells = compute_volume_profile(window_profile, low, high)
     zones = [z for z in build_volume_zones(cells) if z["touches"] >= MIN_ZONE_TOUCHES]
     if not zones:
         return []
@@ -358,9 +384,18 @@ def approach_ok(df5: pd.DataFrame, zone: dict, trend: str) -> bool:
     return recent["Low"].min() <= zone["lo"]
 
 
+def zone_is_dwelling(df5: pd.DataFrame, zone: dict) -> bool:
+    """v7: ціна 'живе' всередині зони (поглинає її) — це консолідація
+    всередині стіни, а не реакція від неї."""
+    if len(df5) < DWELL_LOOKBACK + 1:
+        return False
+    closes = df5["Close"].iloc[-(DWELL_LOOKBACK + 1):-1]  # лише закриті свічки
+    inside = ((closes >= zone["lo"]) & (closes <= zone["hi"])).sum()
+    return inside >= DWELL_MAX_CLOSES
+
+
 def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
-    """'Стіна' пробита: закрита свічка 5m ЗА зоною. BUY: закриття нижче низу
-    зони (підтримку зламано). SELL: закриття вище верху зони (опір зламано)."""
+    """'Стіна' пробита: закрита свічка 5m ЗА зоною."""
     if len(df5) < 2:
         return False
     c = df5.iloc[-2]
@@ -581,7 +616,9 @@ def evaluate_pair(pair: str, state: dict, news_events):
         print(f"{pair}: пара покинула гру після пробою зони — чекаємо")
         return None
 
-    ladder = build_entry_ladder(window, low, high, trend)
+    # v7: профіль зон по довшому вікну, край імпульсу — по короткому
+    profile_window = df5.tail(PROFILE_LOOKBACK_5M)
+    ladder = build_entry_ladder(profile_window, low, high, trend)
     if not ladder:
         print(f"{pair}: не вдалось побудувати зони")
         return None
@@ -611,6 +648,10 @@ def evaluate_pair(pair: str, state: dict, news_events):
     for level in ladder:
         if zone_broken(level, df5, trend):
             print(f"{pair}: зону {level['level']} пробито — стіна не спрацювала, пропуск")
+            continue
+        if zone_is_dwelling(df5, level):
+            print(f"{pair}: зона {level['level']} — ціна живе всередині "
+                  f"(поглинання), пропуск")
             continue
         if not in_zone(current_price, level):
             continue
@@ -642,8 +683,10 @@ def evaluate_pair(pair: str, state: dict, news_events):
         break
 
     if candidate is None:
+        # v7: прапорці скидаються ЛИШЕ коли ціна вийшла з зони
         for level in ladder:
-            state[f"{pair}_{trend}_level{level['level']}"] = False
+            if not in_zone(current_price, level):
+                state[f"{pair}_{trend}_level{level['level']}"] = False
         zones_str = [f"{l['lo']:.5f}-{l['hi']:.5f}" for l in ladder]
         print(f"{pair}: тренд={trend}({source}), ціна={current_price:.5f}, зони={zones_str}")
     return candidate
