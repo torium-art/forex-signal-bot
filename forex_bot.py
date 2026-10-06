@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v11
+Forex Price-Action Signal Bot — v12
 """
 import csv
 import json
@@ -41,23 +41,29 @@ GLOBAL_DIST_ATR = 1.0
 EFFICIENCY_MIN = 0.15
 NET_MOVE_ATR_MIN = 2.0
 
-# FIX 10: перевірка "свіжого імпульсу" на 30m — щоб боковик не читався як тренд
-IMPULSE_CONFIRM_LOOKBACK = 8    # останні 8 свічок 30m (~4 години)
-IMPULSE_CONFIRM_REF = 24        # на фоні останніх 24 свічок
+IMPULSE_CONFIRM_LOOKBACK = 8
+IMPULSE_CONFIRM_REF = 24
 
 POC_ZONES = 30
 TOLERANCE_PCT = 0.00015
 IMPULSE_LOOKBACK_5M = 150
-PROFILE_LOOKBACK_5M = 200       # FIX 13: було 350 — занадто глибоко заглядає в учорашній день
+PROFILE_LOOKBACK_5M = 200
 VALLEY_FRACTION = 0.15
-MAX_ZONE_WIDTH_PCT = 0.0006     # FIX 11: було 0.002 — зони стануть ~в 3 рази вужчі
+MAX_ZONE_WIDTH_PCT = 0.0006
 MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1
 MIN_WICK_RATIO = 0.35
 EXTREME_AGE_MIN = 2
 
+# FIX 14: мінімальний відкат від екстремуму імпульсу (25%).
+# Без цього бот входив на самому піку імпульсу (як з CADJPY, де було 2.4%).
+MIN_PULLBACK_FRACTION = 0.25
+
+# FIX 15: мінімальна "сила" зони по об'єму. Слабші зони (<7%) пропускаємо.
+MIN_ZONE_STRENGTH = 0.07
+
 DWELL_LOOKBACK = 12
-DWELL_MAX_CLOSES = 6            # FIX 12: було 4 — занадто легко ловило "поглинання"
+DWELL_MAX_CLOSES = 6
 
 SIGNAL_COOLDOWN_MIN = 20
 BREAKOUT_RANGE_MULT = 1.8
@@ -144,9 +150,6 @@ def efficiency_ratio(closes: pd.Series, lookback: int) -> float:
     return abs(w.iloc[-1] - w.iloc[0]) / volatility if volatility > 0 else 0.0
 
 
-# FIX 10: перевірка, що тренд підтверджений СВІЖИМ імпульсом на 30m.
-# Користувач торгує тільки коли ціна "імпульсно обновила максимум/мінімум",
-# а не коли дві половини вікна випадково розташувались у потрібному порядку.
 def recent_impulse_confirms(df: pd.DataFrame, trend: str) -> tuple:
     if len(df) < IMPULSE_CONFIRM_REF:
         return False, "мало даних для перевірки імпульсу"
@@ -159,7 +162,6 @@ def recent_impulse_confirms(df: pd.DataFrame, trend: str) -> tuple:
             return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m закрились нижче (нетто-рух вниз)"
         win_high = window["High"].max()
         rec_high = recent["High"].max()
-        # недавній максимум має бути максимумом усього вікна (з допуском 1 тік)
         if rec_high < win_high - 1e-6:
             return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m не оновили максимум вікна"
         return True, "ok"
@@ -211,7 +213,6 @@ def analyze_trend_30m(df: pd.DataFrame):
     if REQUIRE_GLOBAL_AGREEMENT and global_readable and trend != ema_dir:
         return None, f"неузгодженість: {source} супроти глобального (EMA200)", er
 
-    # FIX 10: обов'язкова перевірка свіжого імпульсу
     ok, why = recent_impulse_confirms(df, trend)
     if not ok:
         return None, f"тренд {trend} ({source}) не підтверджений імпульсом: {why}", er
@@ -253,7 +254,6 @@ def split_wide_segment(idx, vols, cells, cap_pct):
     lo_i, hi_i = idx[0], idx[-1]
     denom = cells[hi_i]["hi"] or 1.0
     width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / denom
-    # FIX 11: дозволяємо дробити до однієї клітинки
     if width <= cap_pct or len(idx) <= 1:
         return [idx]
     interior = idx[1:-1]
@@ -472,8 +472,8 @@ def format_signal(pair: str, trend: str, price: float, level: dict,
         f"({side})\n"
         f"Ціна входу: <code>{price:.5f}</code>\n"
         f"Експірація: {level['expiry_min']} хв\n"
-        f"Тренд M30: {source} | сила зони: {level['strength'] * 100:.1f}% обсягу\n"
-        f"Score: {score}"
+        f"Тренд M30: {source} | сила зони: {float(level['strength']) * 100:.1f}% обсягу\n"
+        f"Score: {float(score)}"
         f"{warning}\n"
         f"Час: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)"
     )
@@ -587,6 +587,21 @@ def evaluate_pair(pair: str, state: dict, news_events):
         print(f"{pair}: імпульс ще свіжий, відкат не почався")
         return None
 
+    # FIX 14: мінімальний відкат від екстремуму імпульсу
+    impulse_range = high - low
+    if impulse_range <= 0:
+        print(f"{pair}: імпульс має нульовий діапазон")
+        return None
+    current_price_now = float(df5["Close"].iloc[-1])
+    if trend == "BUY":
+        pullback_depth = (high - current_price_now) / impulse_range
+    else:
+        pullback_depth = (current_price_now - low) / impulse_range
+    if pullback_depth < MIN_PULLBACK_FRACTION:
+        print(f"{pair}: імпульс ще не відкотився "
+              f"({pullback_depth * 100:.0f}%, треба >= {MIN_PULLBACK_FRACTION * 100:.0f}%) — пропуск")
+        return None
+
     if state.get(f"{pair}_abandon_until", 0) > time.time():
         print(f"{pair}: пара покинула гру після пробою зони — чекаємо")
         return None
@@ -617,7 +632,7 @@ def evaluate_pair(pair: str, state: dict, news_events):
         print(f"{pair}: входи цього імпульсу завершено (POC був останнім)")
         return None
 
-    current_price = float(df5["Close"].iloc[-1])
+    current_price = current_price_now
     breakout = is_impulsive_breakout(df5, trend)
 
     if cooldown_active(state, pair):
@@ -632,6 +647,11 @@ def evaluate_pair(pair: str, state: dict, news_events):
         if zone_is_dwelling(df5, level):
             print(f"{pair}: зона {level['level']} — ціна живе всередині "
                   f"(поглинання), пропуск")
+            continue
+        # FIX 15: слабкі зони (<7% об'єму) не торгуємо
+        if float(level["strength"]) < MIN_ZONE_STRENGTH:
+            print(f"{pair}: зона {level['level']} занадто слабка "
+                  f"({float(level['strength']) * 100:.1f}% об'єму) — пропуск")
             continue
         if not in_zone(current_price, level):
             continue
@@ -648,7 +668,7 @@ def evaluate_pair(pair: str, state: dict, news_events):
             depth = (current_price - level["lo"]) / width
         prox = 1.0 - min(1.0, max(0.0, depth))
         clarity = min(1.0, er / 0.5)
-        score = round(300 * level["strength"] + 20 * prox
+        score = round(300 * float(level["strength"]) + 20 * prox
                       + (15 if level["is_poc"] else 0) + 25 * clarity, 1)
         candidate = {"pair": pair, "trend": trend, "source": source,
                      "er": round(er, 3), "level": level, "entry": current_price,
@@ -702,7 +722,7 @@ def run_cycle(state: dict) -> None:
                 })
                 sent_count += 1
                 print(f"{cand['pair']}: сигнал відправлено "
-                      f"(зона {lvl['level']}, score={cand['score']})")
+                      f"(зона {lvl['level']}, score={float(cand['score'])})")
             else:
                 print(f"{cand['pair']}: помилка надсилання — спробуємо наступного циклу")
         if sent_ok:
@@ -716,13 +736,13 @@ def run_cycle(state: dict) -> None:
             "pair": cand["pair"].replace("=X", ""),
             "direction": cand["trend"],
             "level": lvl["level"],
-            "zone_lo": round(lvl["lo"], 5),
-            "zone_hi": round(lvl["hi"], 5),
-            "entry_price": round(cand["entry"], 5),
+            "zone_lo": float(round(lvl["lo"], 5)),
+            "zone_hi": float(round(lvl["hi"], 5)),
+            "entry_price": float(round(cand["entry"], 5)),
             "expiry_min": lvl["expiry_min"],
-            "score": cand["score"],
-            "strength_pct": round(lvl["strength"] * 100, 1),
-            "er": cand["er"],
+            "score": float(cand["score"]),
+            "strength_pct": float(round(float(lvl["strength"]) * 100, 1)),
+            "er": float(cand["er"]),
             "trend_source": cand["source"],
             "sent": sent_ok,
             "reason": reason,
@@ -757,7 +777,7 @@ def process_outcomes(state: dict) -> None:
                     "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
                     "pair": o["pair"].replace("=X", ""),
                     "direction": o["dir"],
-                    "entry_price": round(o["entry"], 5),
+                    "entry_price": float(round(o["entry"], 5)),
                     "exit_price": "",
                     "result": "UNKNOWN",
                 })
@@ -768,8 +788,8 @@ def process_outcomes(state: dict) -> None:
             "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
             "pair": o["pair"].replace("=X", ""),
             "direction": o["dir"],
-            "entry_price": round(o["entry"], 5),
-            "exit_price": round(exit_price, 5),
+            "entry_price": float(round(o["entry"], 5)),
+            "exit_price": float(round(exit_price, 5)),
             "result": "WIN" if win else "LOSS",
         })
         print(f"[результат] {o['pair']} {o['dir']}: {'WIN' if win else 'LOSS'}")
