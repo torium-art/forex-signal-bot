@@ -1,31 +1,38 @@
 """
-Forex Price-Action Signal Bot — v7
+Forex Price-Action Signal Bot — v8
 
-Зміни v7 (за результатами повної валідації 21 пари на 30m + M5-зон):
-  R1. Фільтр "болота" рахується по вікну 48 свічок 30m (24 год) — вікно,
-      що містить і імпульс, і відкат. Пауза в тренді більше не читається
-      як болото; справжні рейнджі (кілька розворотів за 24 год) лишаються
-      заблокованими. У рядок блокування додано діагностику (er, net*ATR).
-  R2. Напрямок: локальна структура 24 свічок -> середня структура 48 ->
-      EMA200 (якщо структура неоднозначна, а глобальний рух читабельний).
-  R3. Узгодженість з EMA200 лишається (якщо глобальний читанний:
-      ціна >= 1 ATR від EMA200).
-  Профіль зон M5 будується по PROFILE_LOOKBACK_5M=350 свічок (~29 год):
-      POC стає справжньою основою руху, свіжі вузли = рівні 1-2.
-  Фільтр поглинання: якщо ціна "живе" всередині зони (>= DWELL_MAX_CLOSES
-      закриттів з DWELL_LOOKBACK) — це консолідація, не сетап.
-  Анти-дубль: прапорець зони скидається ЛИШЕ коли ціна вийшла з зони
-      (один дотик = один сигнал).
+Повна специфікація трейдера + усі калібрування за результатами валідації
+(21 пара на 30m + M5-зони проти VRVP):
 
-Специфікація трейдера (з v5-v6):
-  M30: тренд локальний+глобальний узгоджені; у болоті сигналів немає.
-  M5: зони-стіни за бічним обсягом (HVN, сегментація по долинах LVN);
-      пробій зони закритою свічкою = стіна впала; пробій POC = злом
-      (пара покидається на ABANDON_MIN хв).
-  Драбина: зона 1 = перший ретест (5 хв), зона 2 = двосторонні дотики
-      (5 хв), зона 3 = POC (10 хв, ОСТАННІЙ вхід імпульсу).
-  Сигнал = ціна в зоні + вхід з боку відкату + відбійна тінь на ЗАКРИТІЙ
-      свічці 5m. За прогін <= MAX_SIGNALS_PER_RUN сигналів (найкращі за score).
+  M30 (трендовий шар, v7):
+    R1. Фільтр "болота" по вікну 48 свічок (24 год) з діаностикою
+        (er, net*ATR) у рядку блокування. Поріг EFFICIENCY_MIN=0.15
+        перекалібровано по доказах: рейнджі дають er <= 0.12,
+        тренд+відкат >= 0.16 (v7.1).
+    R2. Напрямок: структура 24 свічок -> структура 48 -> EMA200
+        (якщо структури неоднозначні, а глобальний читанний).
+    R3. Узгодженість з EMA200, коли глобальний читанний (>= 1 ATR).
+
+  M5 (шар входу, v6-v8):
+    Зони-подушки = вузли горизонтального обсягу (наближення VRVP):
+    сегментація профілю по долинах LVN; зони неперетинні за побудовою.
+    v8: профіль згладжується вікном 3 комірки перед пошуком долин,
+    тому суцільний вузол не фрагментується на тонкі скибки;
+    VALLEY_FRACTION=0.25. Профіль будується по PROFILE_LOOKBACK_5M=350
+    свічок (~29 год), тому POC = справжня основа руху.
+    Обсяг зони = "стіна": закрита свічка ЗА зоною = стіна пробита.
+    Пробій зони POC = злом: пара покидається на ABANDON_MIN хв.
+    Поглинання (v7): якщо ціна "живе" всередині зони (>= DWELL_MAX_CLOSES
+    закриттів з DWELL_LOOKBACK) — це консолідація, не сетап.
+
+  Драбина входів:
+    Зона 1 = перший ретест після пробиття (найближча до краю імпульсу) — 5 хв;
+    Зона 2 = зона з дотиками свічок З ОБОХ боків (підтримка+опір) — 5 хв;
+    Зона 3 = POC (найсильніша) — 10 хв, ОСТАННІЙ вхід імпульсу
+    (далі пара мовчить до нового імпульсу).
+  Сигнал = ціна всередині зони + вхід з боку відкату + відбійна тінь
+  на ЗАКРИТІЙ свічці 5m. Анти-дубль скидається ЛИШЕ коли ціна вийшла
+  з зони. За прогін <= MAX_SIGNALS_PER_RUN сигналів (найкращі за score).
 
 Режими (RUN_MODE): once (GitHub Actions) | loop (VPS/ПК).
 Журнал: signals_journal.csv; результати: outcomes_journal.csv (loop).
@@ -65,21 +72,22 @@ BETWEEN_PAIRS_SLEEP_SEC = 1.0
 OUT_OF_WINDOW_SLEEP_SEC = 300
 MAX_SIGNALS_PER_RUN = 2
 
-# --- Тренд M30 (v7: три рівні напрямку +_gate по 48 свічках) ---
+# --- Тренд M30 (v7: gate по 48 свічках, напрямок 24 -> 48 -> EMA200) ---
 TREND_EMA_PERIOD = 200
 STRUCTURE_LOOKBACK = 24            # локальна структура (12 год)
 CONSOLIDATION_LOOKBACK = 48        # фільтр болота + середня структура (24 год)
 REQUIRE_GLOBAL_AGREEMENT = True    # узгодженість з EMA200, коли глобальний читанний
 GLOBAL_DIST_ATR = 1.0              # глобальний "читанний", якщо ціна >= 1 ATR від EMA200
-EFFICIENCY_MIN = 0.15              # нижче = флет/"пила"
+EFFICIENCY_MIN = 0.15              # v7.1: перекалібровано по вікну 48 свічок:
+                                   # рейнджі дають er <= 0.12, тренд+відкат >= 0.16
 NET_MOVE_ATR_MIN = 2.0             # чистий зсув за 48 свічок >= 2 ATR
 
-# --- Зони M5 (вузли обсягу, сегментація по долинах) ---
+# --- Зони M5 (вузли обсягу, сегментація по долинах; v8: згладжування) ---
 POC_ZONES = 30
 TOLERANCE_PCT = 0.00015            # буфер на межах зони для факту "входу"
 IMPULSE_LOOKBACK_5M = 150          # вікно імпульсу (край + свіжість)
-PROFILE_LOOKBACK_5M = 350          # v7: вікно профілю зон (~29 год)
-VALLEY_FRACTION = 0.35             # долина = комірка з обсягом < 35% від макс. профілю
+PROFILE_LOOKBACK_5M = 350          # вікно профілю зон (~29 год)
+VALLEY_FRACTION = 0.25             # v8: м'якший поріг долини (після згладжування)
 MAX_ZONE_WIDTH_PCT = 0.002         # зона не ширша за 0.2% (ширше = ріжемо по LVN)
 MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1                  # мін. дотиків З КОЖНОГО боку для зони 2
@@ -185,7 +193,7 @@ def efficiency_ratio(closes: pd.Series, lookback: int) -> float:
 
 def analyze_trend_30m(df: pd.DataFrame):
     """(trend, source, er).
-    R1: болото-гейт по 48 свічках з діаностикою (er, net*ATR).
+    R1: болото-гейт по 48 свічках з діагностикою (er, net*ATR).
     R2: напрямок = структура24 (узгоджена з net24) -> структура48
         (узгоджена з net48) -> EMA200 (якщо читанна).
     R3: узгодженість з EMA200, коли глобальний читанний (>= 1 ATR)."""
@@ -232,10 +240,12 @@ def analyze_trend_30m(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# ЗОНИ M5: профіль обсягу + сегментація по долинах (v6/v7)
+# ЗОНИ M5: профіль обсягу + сегментація по долинах (v8: зі згладжуванням)
 # ---------------------------------------------------------------------------
 def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
-    """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}."""
+    """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}.
+    above = дотики ЗВЕРХУ (Low свічки всередині комірки),
+    below = дотики ЗНИЗУ (High свічки всередині комірки)."""
     if high <= low:
         mid = (high + low) / 2
         return [{"lo": mid, "hi": mid, "vol": 1.0, "touches": 1,
@@ -266,7 +276,8 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
 
 
 def split_wide_segment(idx, vols, cells, cap_pct):
-    """Рекурсивно ріже широкий сегмент у точці найменшого обсягу (LVN-межа)."""
+    """Рекурсивно ріже широкий сегмент у точці найменшого обсягу (LVN-межа),
+    поки шматки не вкладуться в cap_pct."""
     lo_i, hi_i = idx[0], idx[-1]
     width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / cells[hi_i]["hi"]
     if width <= cap_pct or len(idx) <= 2:
@@ -280,24 +291,34 @@ def split_wide_segment(idx, vols, cells, cap_pct):
 
 
 def build_volume_zones(cells):
-    """Зони = вузли HVN, розділені долинами LVN; неперетинні за побудовою."""
-    vols = [c["vol"] for c in cells]
-    total = sum(vols)
+    """Зони = вузли високого обсягу (HVN), розділені долинами малого
+    обсягу (LVN), як у TradingView VRVP.
+    v8: профіль згладжується вікном 3 комірки перед пошуком долин, тому
+    суцільний вузол не фрагментується на тонкі скибки навколо пікових
+    комірок. Зони неперетинні за побудовою (ланцюгове злиття неможливе).
+    Занадто широкий сегмент ріжеться по найслабших внутрішніх комірках."""
+    raw = [c["vol"] for c in cells]
+    total = sum(raw)
     if total <= 0:
         return []
+    n = len(cells)
+    vols = []
+    for i in range(n):
+        lo = max(0, i - 1)
+        hi = min(n, i + 2)
+        vols.append(sum(raw[lo:hi]) / (hi - lo))
     max_vol = max(vols)
     if max_vol <= 0:
         return []
-    n = len(cells)
     is_valley = [vols[i] < VALLEY_FRACTION * max_vol for i in range(n)]
     zones = []
     i = 0
     while i < n:
-        if is_valley[i] or vols[i] <= 0:
+        if is_valley[i] or raw[i] <= 0:
             i += 1
             continue
         j = i
-        while j + 1 < n and vols[j + 1] > 0 and not is_valley[j + 1]:
+        while j + 1 < n and raw[j + 1] > 0 and not is_valley[j + 1]:
             j += 1
         seg = list(range(i, j + 1))
         width = (cells[j]["hi"] - cells[i]["lo"]) / cells[j]["hi"]
@@ -307,7 +328,7 @@ def build_volume_zones(cells):
             pieces = [seg]
         for piece in pieces:
             lo_i, hi_i = piece[0], piece[-1]
-            zone_vol = sum(vols[k] for k in piece)
+            zone_vol = sum(raw[k] for k in piece)
             zones.append({
                 "lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
                 "touches": sum(cells[k]["touches"] for k in piece),
@@ -328,9 +349,10 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
 
 def build_entry_ladder(window_profile: pd.DataFrame, low: float, high: float,
                        trend: str):
-    """Драбина: зона 1 = перший ретест (найближча до краю імпульсу),
-    зона 2 = двосторонні дотики, зона 3 = POC (профіль по PROFILE_LOOKBACK_5M,
-    тому POC = справжня основа руху, а свіжі вузли = рівні 1-2)."""
+    """Драбина за спекою: зона 1 = перший ретест (найближча до краю імпульсу),
+    зона 2 = зона з дотиками з обох боків, зона 3 = POC (найсильніша).
+    Профіль по PROFILE_LOOKBACK_5M, тому POC = справжня основа руху,
+    а свіжі вузли = рівні 1-2."""
     cells = compute_volume_profile(window_profile, low, high)
     zones = [z for z in build_volume_zones(cells) if z["touches"] >= MIN_ZONE_TOUCHES]
     if not zones:
@@ -395,7 +417,8 @@ def zone_is_dwelling(df5: pd.DataFrame, zone: dict) -> bool:
 
 
 def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
-    """'Стіна' пробита: закрита свічка 5m ЗА зоною."""
+    """'Стіна' пробита: закрита свічка 5m ЗА зоною. BUY: закриття нижче низу
+    зони (підтримку зламано). SELL: закриття вище верху зони (опір зламано)."""
     if len(df5) < 2:
         return False
     c = df5.iloc[-2]
@@ -405,6 +428,7 @@ def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
 
 
 def is_reaction_candle(df5: pd.DataFrame, trend: str) -> bool:
+    """Реакція на ОСТАННІЙ ЗАКРИТІЙ свічці 5m: довга відбійна тінь."""
     if len(df5) < 2:
         return False
     c = df5.iloc[-2]
@@ -616,7 +640,7 @@ def evaluate_pair(pair: str, state: dict, news_events):
         print(f"{pair}: пара покинула гру після пробою зони — чекаємо")
         return None
 
-    # v7: профіль зон по довшому вікну, край імпульсу — по короткому
+    # профіль зон по довшому вікну, край імпульсу — по короткому
     profile_window = df5.tail(PROFILE_LOOKBACK_5M)
     ladder = build_entry_ladder(profile_window, low, high, trend)
     if not ladder:
@@ -683,7 +707,7 @@ def evaluate_pair(pair: str, state: dict, news_events):
         break
 
     if candidate is None:
-        # v7: прапорці скидаються ЛИШЕ коли ціна вийшла з зони
+        # анти-дубль: прапорці скидаються ЛИШЕ коли ціна вийшла з зони
         for level in ladder:
             if not in_zone(current_price, level):
                 state[f"{pair}_{trend}_level{level['level']}"] = False
