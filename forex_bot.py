@@ -71,7 +71,7 @@ STRUCTURE_LOOKBACK = 24            # локальна структура (12 г�
 CONSOLIDATION_LOOKBACK = 48        # фільтр болота + середня структура (24 год)
 REQUIRE_GLOBAL_AGREEMENT = True    # узгодженість з EMA200, коли глобальний читанний
 GLOBAL_DIST_ATR = 1.0              # глобальний "читанний", якщо ціна >= 1 ATR від EMA200
-EFFICIENCY_MIN = 0.25              # нижче = флет/"пила"
+EFFICIENCY_MIN = 0.15              # нижче = флет/"пила"
 NET_MOVE_ATR_MIN = 2.0             # чистий зсув за 48 свічок >= 2 ATR
 
 # --- Зони M5 (вузли обсягу, сегментація по долинах) ---
