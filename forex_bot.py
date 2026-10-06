@@ -1,45 +1,5 @@
 """
 Forex Price-Action Signal Bot — v9
-
-Повна специфікація трейдера + усі калібрування за результатами валідації
-(21 пара на 30m + M5-зони проти VRVP):
-
-  M30 (трендовий шар, v7):
-    R1. Фільтр "болота" по вікну 48 свічок (24 год) з діагностикою
-        (er, net*ATR) у рядку блокування. Поріг EFFICIENCY_MIN=0.15
-        перекалібровано по доказах: рейнджі дають er <= 0.12,
-        тренд+відкат >= 0.16 (v7.1).
-    R2. Напрямок: структура 24 свічок -> структура 48 -> EMA200
-        (якщо структури неоднозначні, а глобальний читанний).
-    R3. Узгодженість з EMA200, коли глобальний читанний (>= 1 ATR).
-
-  M5 (шар входу, v6-v9):
-    Зони-подушки = вузли горизонтального обсягу (наближення VRVP):
-    сегментація профілю по долинах LVN; зони неперетинні за побудовою.
-    v8: профіль згладжується вікном 3 комірки перед пошуком долин,
-    тому суцільний вузол не фрагментується на тонкі скибки.
-    v9: VALLEY_FRACTION=0.15 — тонкі краї вузлів (40-60% піка) більше
-    не ріжуться як долини, тому ВЕРХНЯ полиця вузла входить у зону:
-    зона 1 сідає на перший ретест, а не на тіло вузла (кейс AUDJPY:
-    зона піднялась з 110.118 до верхньої полиці ~110.18).
-    Профіль будується по PROFILE_LOOKBACK_5M=350 свічок (~29 год),
-    тому POC = справжня основа руху.
-    Обсяг зони = "стіна": закрита свічка ЗА зоною = стіна пробита.
-    Пробій зони POC = злом: пара покидається на ABANDON_MIN хв.
-    Поглинання (v7): якщо ціна "живе" всередині зони (>= DWELL_MAX_CLOSES
-    закриттів з DWELL_LOOKBACK) — це консолідація, не сетап.
-
-  Драбина входів:
-    Зона 1 = перший ретест після пробиття (найближча до краю імпульсу) — 5 хв;
-    Зона 2 = зона з дотиками свічок З ОБОХ боків (підтримка+опір) — 5 хв;
-    Зона 3 = POC (найсильніша) — 10 хв, ОСТАННІЙ вхід імпульсу
-    (далі пара мовчить до нового імпульсу).
-  Сигнал = ціна всередині зони + вхід з боку відкату + відбійна тінь
-  на ЗАКРИТІЙ свічці 5m. Анти-дубль скидається ЛИШЕ коли ціна вийшла
-  з зони. За прогін <= MAX_SIGNALS_PER_RUN сигналів (найкращі за score).
-
-Режими (RUN_MODE): once (GitHub Actions) | loop (VPS/ПК).
-Журнал: signals_journal.csv; результати: outcomes_journal.csv (loop).
 """
 import csv
 import json
@@ -52,9 +12,6 @@ import pandas as pd
 import yfinance as yf
 import requests
 
-# ---------------------------------------------------------------------------
-# НАЛАШТУВАННЯ
-# ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PASTE_YOUR_TOKEN_HERE")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PASTE_YOUR_CHAT_ID_HERE")
 
@@ -70,49 +27,41 @@ TZ = ZoneInfo("Europe/Kyiv")
 WORK_START = dtime(10, 0)
 WORK_END = dtime(20, 0)
 
-RUN_MODE = os.environ.get("RUN_MODE", "once")     # "once" | "loop"
+RUN_MODE = os.environ.get("RUN_MODE", "once")
 CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "60"))
 BETWEEN_PAIRS_SLEEP_SEC = 1.0
 OUT_OF_WINDOW_SLEEP_SEC = 300
 MAX_SIGNALS_PER_RUN = 2
 
-# --- Тренд M30 (v7: gate по 48 свічках, напрямок 24 -> 48 -> EMA200) ---
 TREND_EMA_PERIOD = 200
-STRUCTURE_LOOKBACK = 24            # локальна структура (12 год)
-CONSOLIDATION_LOOKBACK = 48        # фільтр болота + середня структура (24 год)
-REQUIRE_GLOBAL_AGREEMENT = True    # узгодженість з EMA200, коли глобальний читанний
-GLOBAL_DIST_ATR = 1.0              # глобальний "читанний", якщо ціна >= 1 ATR від EMA200
-EFFICIENCY_MIN = 0.15              # v7.1: перекалібровано по вікну 48 свічок:
-                                   # рейнджі дають er <= 0.12, тренд+відкат >= 0.16
-NET_MOVE_ATR_MIN = 2.0             # чистий зсув за 48 свічок >= 2 ATR
+STRUCTURE_LOOKBACK = 24
+CONSOLIDATION_LOOKBACK = 48
+REQUIRE_GLOBAL_AGREEMENT = True
+GLOBAL_DIST_ATR = 1.0
+EFFICIENCY_MIN = 0.15
+NET_MOVE_ATR_MIN = 2.0
 
-# --- Зони M5 (вузли обсягу, сегментація по долинах; v8-v9) ---
 POC_ZONES = 30
-TOLERANCE_PCT = 0.00015            # буфер на межах зони для факту "входу"
-IMPULSE_LOOKBACK_5M = 150          # вікно імпульсу (край + свіжість)
-PROFILE_LOOKBACK_5M = 350          # вікно профілю зон (~29 год)
-VALLEY_FRACTION = 0.15             # v9: м'якший поріг долини після згладжування:
-                                   # краї вузлів (40-60% піка) не ріжуться,
-                                   # верхня полиця вузла входить у зону 1
-MAX_ZONE_WIDTH_PCT = 0.002         # зона не ширша за 0.2% (ширше = ріжемо по LVN)
+TOLERANCE_PCT = 0.00015
+IMPULSE_LOOKBACK_5M = 150
+PROFILE_LOOKBACK_5M = 350
+VALLEY_FRACTION = 0.15
+MAX_ZONE_WIDTH_PCT = 0.002
 MIN_ZONE_TOUCHES = 4
-MIN_TWO_SIDED = 1                  # мін. дотиків З КОЖНОГО боку для зони 2
+MIN_TWO_SIDED = 1
 MIN_WICK_RATIO = 0.35
-EXTREME_AGE_MIN = 2                # екстремум імпульсу >= 2 свічок тому (відкат почався)
+EXTREME_AGE_MIN = 2
 
-# --- Поглинання зони (v7) ---
-DWELL_LOOKBACK = 12                # скільки закритих свічок перевіряємо (~1 год)
-DWELL_MAX_CLOSES = 4               # максимум закриттів усередині зони, поки це "реакція"
+DWELL_LOOKBACK = 12
+DWELL_MAX_CLOSES = 4
 
-# --- Сигнали / стіни ---
 SIGNAL_COOLDOWN_MIN = 20
 BREAKOUT_RANGE_MULT = 1.8
 BREAKOUT_LOOKBACK = 20
-LEVEL_EXPIRY_BASE_MIN = 5          # зони 1-2
-LEVEL_EXPIRY_POC_MIN = 10          # POC (останній вхід)
-ABANDON_MIN = 60                   # покинути пару на N хв після пробою POC-зони
+LEVEL_EXPIRY_BASE_MIN = 5
+LEVEL_EXPIRY_POC_MIN = 10
+ABANDON_MIN = 60
 
-# --- Новини ---
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEWS_BEFORE_MIN = 25
 NEWS_AFTER_MIN = 20
@@ -129,9 +78,6 @@ JOURNAL_FIELDS = ["ts", "pair", "direction", "level", "zone_lo", "zone_hi",
 OUTCOME_FIELDS = ["ts", "pair", "direction", "entry_price", "exit_price", "result"]
 
 
-# ---------------------------------------------------------------------------
-# ДОПОМІЖНІ
-# ---------------------------------------------------------------------------
 def in_trading_window() -> bool:
     now_dt = datetime.now(TZ)
     if now_dt.weekday() >= 5:
@@ -164,9 +110,6 @@ def fetch_candles(pair: str, interval: str, period: str) -> pd.DataFrame:
     return df.dropna()
 
 
-# ---------------------------------------------------------------------------
-# ТРЕНД M30 (v7: R1 gate 48, R2 напрямок 24->48->EMA200, R3 узгодженість)
-# ---------------------------------------------------------------------------
 def trend_by_ema(df: pd.DataFrame, period: int):
     if len(df) < period:
         return None
@@ -198,18 +141,12 @@ def efficiency_ratio(closes: pd.Series, lookback: int) -> float:
 
 
 def analyze_trend_30m(df: pd.DataFrame):
-    """(trend, source, er).
-    R1: болото-гейт по 48 свічках з діагностикою (er, net*ATR).
-    R2: напрямок = структура24 (узгоджена з net24) -> структура48
-        (узгоджена з net48) -> EMA200 (якщо читанна).
-    R3: узгодженість з EMA200, коли глобальний читанний (>= 1 ATR)."""
     if len(df) < CONSOLIDATION_LOOKBACK + 1:
         return None, "мало даних 30m", 0.0
     atr = (df["High"] - df["Low"]).tail(14).mean()
     if atr <= 0:
         return None, "atr=0", 0.0
 
-    # R1: фільтр болота по великому вікну
     er = efficiency_ratio(df["Close"], CONSOLIDATION_LOOKBACK)
     w48 = df.tail(CONSOLIDATION_LOOKBACK)
     net48 = w48["Close"].iloc[-1] - w48["Close"].iloc[0]
@@ -217,7 +154,6 @@ def analyze_trend_30m(df: pd.DataFrame):
         return None, (f"консолідація на 30m (er={er:.2f}, "
                       f"net={abs(net48) / atr:.1f}*ATR)"), er
 
-    # R2: напрямок
     trend, source = None, None
     w24 = df.tail(STRUCTURE_LOOKBACK)
     net24 = w24["Close"].iloc[-1] - w24["Close"].iloc[0]
@@ -239,19 +175,12 @@ def analyze_trend_30m(df: pd.DataFrame):
     if trend is None:
         return None, "немає чіткого тренда (структури 24/48 неоднозначні)", er
 
-    # R3: узгодженість з глобальним
     if REQUIRE_GLOBAL_AGREEMENT and global_readable and trend != ema_dir:
         return None, f"неузгодженість: {source} супроти глобального (EMA200)", er
     return trend, source, er
 
 
-# ---------------------------------------------------------------------------
-# ЗОНИ M5: профіль обсягу + сегментація по долинах (v8: згладжування, v9: поріг)
-# ---------------------------------------------------------------------------
 def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
-    """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}.
-    above = дотики ЗВЕРХУ (Low свічки всередині комірки),
-    below = дотики ЗНИЗУ (High свічки всередині комірки)."""
     if high <= low:
         mid = (high + low) / 2
         return [{"lo": mid, "hi": mid, "vol": 1.0, "touches": 1,
@@ -270,8 +199,8 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
         for z in range(z_lo, z_hi + 1):
             touches[z] += 1
             vol[z] += v
-        above[z_lo] += 1   # low свічки зайшов у комірку зверху
-        below[z_hi] += 1   # high свічки зайшов у комірку знизу
+        above[z_lo] += 1
+        below[z_hi] += 1
     cells = []
     for i in range(POC_ZONES):
         cells.append({"lo": low + zone_size * i,
@@ -282,8 +211,6 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
 
 
 def split_wide_segment(idx, vols, cells, cap_pct):
-    """Рекурсивно ріже широкий сегмент у точці найменшого обсягу (LVN-межа),
-    поки шматки не вкладуться в cap_pct."""
     lo_i, hi_i = idx[0], idx[-1]
     width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / cells[hi_i]["hi"]
     if width <= cap_pct or len(idx) <= 2:
@@ -297,14 +224,6 @@ def split_wide_segment(idx, vols, cells, cap_pct):
 
 
 def build_volume_zones(cells):
-    """Зони = вузли високого обсягу (HVN), розділені долинами малого
-    обсягу (LVN), як у TradingView VRVP.
-    v8: профіль згладжується вікном 3 комірки перед пошуком долин, тому
-    суцільний вузол не фрагментується на тонкі скибки навколо пікових
-    комірок. v9: поріг долини 0.15 — тонкі краї вузлів лишаються частиною
-    вузла, тож верхня полиця входить у зону (зона 1 = перший ретест).
-    Зони неперетинні за побудовою (ланцюгове злиття неможливе).
-    Занадто широкий сегмент ріжеться по найслабших внутрішніх комірках."""
     raw = [c["vol"] for c in cells]
     total = sum(raw)
     if total <= 0:
@@ -355,19 +274,26 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
             "expiry_min": LEVEL_EXPIRY_POC_MIN if is_poc else LEVEL_EXPIRY_BASE_MIN}
 
 
-def build_entry_ladder(window_profile: pd.DataFrame, low: float, high: float,
+def build_entry_ladder(window_profile: pd.DataFrame, edge_low: float, edge_high: float,
                        trend: str):
-    """Драбина за спекою: зона 1 = перший ретест (найближча до краю імпульсу),
-    зона 2 = зона з дотиками з обох боків, зона 3 = POC (найсильніша).
-    Профіль по PROFILE_LOOKBACK_5M, тому POC = справжня основа руху,
-    а свіжі вузли = рівні 1-2."""
-    cells = compute_volume_profile(window_profile, low, high)
+    # ВАЖЛИВО: гістограма обсягу будується по ПОВНОМУ діапазону вікна профілю
+    # (window_profile), а не по вужчому діапазону останнього імпульсу.
+    # Якщо використати вузький edge_low/edge_high для бакетів — будь-яка
+    # свічка з profile-вікна, що виходить за ці межі, "втискується" у крайню
+    # зону (0 або POC_ZONES-1), створюючи штучний роздутий об'єм на краю,
+    # який може стати фальшивим POC далеко від реальної ціни.
+    profile_low = window_profile["Low"].min()
+    profile_high = window_profile["High"].max()
+    cells = compute_volume_profile(window_profile, profile_low, profile_high)
     zones = [z for z in build_volume_zones(cells) if z["touches"] >= MIN_ZONE_TOUCHES]
     if not zones:
         return []
     poc = max(zones, key=lambda z: z["share"])
     poc_c = (poc["lo"] + poc["hi"]) / 2
-    edge = high if trend == "BUY" else low
+    # edge (край останнього імпульсу) і далі використовується лише для
+    # сортування зон по шляху відкату — це вузький, "свіжий" орієнтир,
+    # і це коректно, бо він лежить всередині ширшого profile-діапазону
+    edge = edge_high if trend == "BUY" else edge_low
     others = [z for z in zones if z is not poc]
     if trend == "BUY":
         path = [z for z in others if poc_c <= (z["lo"] + z["hi"]) / 2 <= edge]
@@ -378,12 +304,12 @@ def build_entry_ladder(window_profile: pd.DataFrame, low: float, high: float,
 
     ladder = []
     if path:
-        ladder.append(_mk_level(len(ladder) + 1, path[0], False))     # зона 1
+        ladder.append(_mk_level(len(ladder) + 1, path[0], False))
         two_sided = [z for z in path[1:]
                      if z["above"] >= MIN_TWO_SIDED and z["below"] >= MIN_TWO_SIDED]
         if two_sided:
-            ladder.append(_mk_level(len(ladder) + 1, two_sided[0], False))  # зона 2
-    ladder.append(_mk_level(len(ladder) + 1, poc, True))              # зона 3 = POC
+            ladder.append(_mk_level(len(ladder) + 1, two_sided[0], False))
+    ladder.append(_mk_level(len(ladder) + 1, poc, True))
     return ladder
 
 
@@ -405,7 +331,6 @@ def in_zone(price: float, zone: dict) -> bool:
 
 
 def approach_ok(df5: pd.DataFrame, zone: dict, trend: str) -> bool:
-    """Вхід у зону з боку відкату: BUY — зверху, SELL — знизу."""
     if len(df5) < 4:
         return False
     recent = df5.iloc[-4:-1]
@@ -415,18 +340,14 @@ def approach_ok(df5: pd.DataFrame, zone: dict, trend: str) -> bool:
 
 
 def zone_is_dwelling(df5: pd.DataFrame, zone: dict) -> bool:
-    """v7: ціна 'живе' всередині зони (поглинає її) — це консолідація
-    всередині стіни, а не реакція від неї."""
     if len(df5) < DWELL_LOOKBACK + 1:
         return False
-    closes = df5["Close"].iloc[-(DWELL_LOOKBACK + 1):-1]  # лише закриті свічки
+    closes = df5["Close"].iloc[-(DWELL_LOOKBACK + 1):-1]
     inside = ((closes >= zone["lo"]) & (closes <= zone["hi"])).sum()
     return inside >= DWELL_MAX_CLOSES
 
 
 def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
-    """'Стіна' пробита: закрита свічка 5m ЗА зоною. BUY: закриття нижче низу
-    зони (підтримку зламано). SELL: закриття вище верху зони (опір зламано)."""
     if len(df5) < 2:
         return False
     c = df5.iloc[-2]
@@ -436,7 +357,6 @@ def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
 
 
 def is_reaction_candle(df5: pd.DataFrame, trend: str) -> bool:
-    """Реакція на ОСТАННІЙ ЗАКРИТІЙ свічці 5m: довга відбійна тінь."""
     if len(df5) < 2:
         return False
     c = df5.iloc[-2]
@@ -485,9 +405,6 @@ def mark_signal_sent(state: dict, pair: str) -> None:
     state[f"{pair}_last_signal_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
 
 
-# ---------------------------------------------------------------------------
-# TELEGRAM / ЖУРНАЛ
-# ---------------------------------------------------------------------------
 def send_telegram_message(html_text: str) -> None:
     if not in_trading_window():
         print("[Telegram] пропущено — поза торговим вікном")
@@ -519,4 +436,330 @@ def format_signal(pair: str, trend: str, price: float, level: dict,
         f"Напрямок: {direction}\n"
         f"{level_label}\n"
         f"Зона: <code>{level['lo']:.5f}</code>–<code>{level['hi']:.5f}</code> "
-        f"({
+        f"({side})\n"
+        f"Ціна входу: <code>{price:.5f}</code>\n"
+        f"Експірація: {level['expiry_min']} хв\n"
+        f"Тренд M30: {source} | сила зони: {level['strength'] * 100:.1f}% обсягу\n"
+        f"Score: {score}"
+        f"{warning}\n"
+        f"Час: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)"
+    )
+
+
+def journal_write(row: dict) -> None:
+    new_file = not os.path.exists(JOURNAL_FILE)
+    with open(JOURNAL_FILE, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=JOURNAL_FIELDS)
+        if new_file:
+            w.writeheader()
+        w.writerow(row)
+    print(f"[журнал] {row}")
+
+
+def outcome_write(row: dict) -> None:
+    new_file = not os.path.exists(OUTCOMES_FILE)
+    with open(OUTCOMES_FILE, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=OUTCOME_FIELDS)
+        if new_file:
+            w.writeheader()
+        w.writerow(row)
+
+
+def print_outcome_stats() -> None:
+    if not os.path.exists(OUTCOMES_FILE):
+        return
+    try:
+        df = pd.read_csv(OUTCOMES_FILE)
+    except Exception:
+        return
+    if df.empty:
+        return
+    wins = int((df["result"] == "WIN").sum())
+    losses = int((df["result"] == "LOSS").sum())
+    total = wins + losses
+    if total:
+        print(f"[статистика] результатів: {total}, WIN: {wins} ({wins / total:.0%}), LOSS: {losses}")
+
+
+def fetch_high_impact_events():
+    try:
+        resp = requests.get(NEWS_CALENDAR_URL, timeout=15)
+        resp.raise_for_status()
+        events = resp.json()
+    except Exception as e:
+        print(f"[Календар] помилка: {e}")
+        return []
+    out = []
+    for ev in events:
+        if ev.get("impact") != "High" or ev.get("country") not in WATCHED_CURRENCIES:
+            continue
+        try:
+            ev_time = datetime.fromisoformat(ev["date"].replace("Z", "+00:00")).astimezone(TZ)
+        except Exception:
+            continue
+        out.append({"title": ev.get("title", "Подія"),
+                    "currency": ev.get("country"), "time": ev_time})
+    return out
+
+
+def find_relevant_news_window(pair: str, events):
+    clean = pair.replace("=X", "")
+    pair_currencies = {clean[:3], clean[3:6]}
+    now = datetime.now(TZ)
+    for ev in events:
+        if ev["currency"] not in pair_currencies:
+            continue
+        delta_min = (ev["time"] - now).total_seconds() / 60
+        if -NEWS_AFTER_MIN <= delta_min <= NEWS_BEFORE_MIN:
+            return ev
+    return None
+
+
+def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
+    clean_pair = pair.replace("=X", "")
+    key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
+    if state.get(key):
+        return
+    msg = (f"⚠️ <b>Скоро важлива новина: {clean_pair}</b>\n"
+           f"Подія: {event['title']} ({event['currency']})\n"
+           f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
+           f"Рекомендація: не торгувати ~{NEWS_BEFORE_MIN} хв до і "
+           f"~{NEWS_AFTER_MIN} хв після виходу.")
+    send_telegram_message(msg)
+    state[key] = True
+
+
+def evaluate_pair(pair: str, state: dict, news_events):
+    news_hit = find_relevant_news_window(pair, news_events)
+    if news_hit:
+        maybe_send_news_warning(pair, news_hit, state)
+        print(f"{pair}: пропуск — поруч новина ({news_hit['title']})")
+        return None
+
+    df30 = fetch_candles(pair, interval="30m", period="30d")
+    if df30.empty:
+        return None
+    trend, source, er = analyze_trend_30m(df30)
+    if trend is None:
+        print(f"{pair}: {source} — сигнали вимкнено")
+        return None
+
+    df5 = fetch_candles(pair, interval="5m", period="5d")
+    if len(df5) < IMPULSE_LOOKBACK_5M:
+        print(f"{pair}: недостатньо даних 5m")
+        return None
+
+    low, high, window = find_last_impulse(df5)
+    if extreme_age(window, trend) < EXTREME_AGE_MIN:
+        print(f"{pair}: імпульс ще свіжий, відкат не почався")
+        return None
+
+    if state.get(f"{pair}_abandon_until", 0) > time.time():
+        print(f"{pair}: пара покинула гру після пробою зони — чекаємо")
+        return None
+
+    try:
+        profile_window = df5.tail(PROFILE_LOOKBACK_5M)
+        if not isinstance(profile_window, pd.DataFrame) or profile_window.empty:
+            print(f"{pair}: некоректні дані для профілю зон")
+            return None
+        ladder = build_entry_ladder(profile_window, low, high, trend)  # low/high = edge імпульсу (150 св.)
+    except Exception as e:
+        print(f"{pair}: помилка побудови зон: {e}")
+        return None
+
+    if not ladder:
+        print(f"{pair}: не вдалось побудувати зони")
+        return None
+
+    poc_zone = next(l for l in ladder if l["is_poc"])
+    if zone_broken(poc_zone, df5, trend):
+        state[f"{pair}_abandon_until"] = time.time() + ABANDON_MIN * 60
+        print(f"{pair}: зону POC пробито свічкою — можливий злом, "
+              f"лишаємо пару на {ABANDON_MIN} хв")
+        return None
+
+    sig = f"{low:.5f}|{high:.5f}"
+    if state.get(f"{pair}_done_sig") == sig:
+        print(f"{pair}: входи цього імпульсу завершено (POC був останнім)")
+        return None
+
+    current_price = float(df5["Close"].iloc[-1])
+    breakout = is_impulsive_breakout(df5, trend)
+
+    if cooldown_active(state, pair):
+        print(f"{pair}: кулдаун активний")
+        return None
+
+    candidate = None
+    for level in ladder:
+        if zone_broken(level, df5, trend):
+            print(f"{pair}: зону {level['level']} пробито — стіна не спрацювала, пропуск")
+            continue
+        if zone_is_dwelling(df5, level):
+            print(f"{pair}: зона {level['level']} — ціна живе всередині "
+                  f"(поглинання), пропуск")
+            continue
+        if not in_zone(current_price, level):
+            continue
+        if not approach_ok(df5, level, trend):
+            print(f"{pair}: ціна в зоні {level['level']}, але вхід не з боку відкату")
+            continue
+        if not is_reaction_candle(df5, trend):
+            print(f"{pair}: ціна в зоні {level['level']}, немає підтвердження відбою")
+            continue
+        if breakout and level["level"] > 1:
+            print(f"{pair}: зона {level['level']} пропущена — імпульсний пробій")
+            continue
+        signal_key = f"{pair}_{trend}_level{level['level']}"
+        if state.get(signal_key, False):
+            continue
+        width = max(level["hi"] - level["lo"], 1e-12)
+        if trend == "BUY":
+            depth = (level["hi"] - current_price) / width
+        else:
+            depth = (current_price - level["lo"]) / width
+        prox = 1.0 - min(1.0, max(0.0, depth))
+        clarity = min(1.0, er / 0.5)
+        score = round(300 * level["strength"] + 20 * prox
+                      + (15 if level["is_poc"] else 0) + 25 * clarity, 1)
+        candidate = {"pair": pair, "trend": trend, "source": source,
+                     "er": round(er, 3), "level": level, "entry": current_price,
+                     "score": score, "breakout": breakout,
+                     "signal_key": signal_key, "sig": sig}
+        break
+
+    if candidate is None:
+        for level in ladder:
+            if not in_zone(current_price, level):
+                state[f"{pair}_{trend}_level{level['level']}"] = False
+        zones_str = [f"{l['lo']:.5f}-{l['hi']:.5f}" for l in ladder]
+        print(f"{pair}: тренд={trend}({source}), ціна={current_price:.5f}, зони={zones_str}")
+    return candidate
+
+
+def run_cycle(state: dict) -> None:
+    news_events = fetch_high_impact_events()
+    candidates = []
+    for pair in PAIRS:
+        try:
+            cand = evaluate_pair(pair, state, news_events)
+            if cand:
+                candidates.append(cand)
+        except Exception as e:
+            print(f"[Помилка] {pair}: {e}")
+        time.sleep(BETWEEN_PAIRS_SLEEP_SEC)
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    sent_count = 0
+    for cand in candidates:
+        lvl = cand["level"]
+        sent = sent_count < MAX_SIGNALS_PER_RUN
+        reason = "sent" if sent else "ліміт сигналів за прогін"
+        if sent:
+            msg = format_signal(cand["pair"], cand["trend"], cand["entry"],
+                                lvl, cand["breakout"], cand["source"], cand["score"])
+            send_telegram_message(msg)
+            state[cand["signal_key"]] = True
+            mark_signal_sent(state, cand["pair"])
+            if lvl["is_poc"]:
+                state[f"{cand['pair']}_done_sig"] = cand["sig"]
+            state.setdefault("pending_outcomes", []).append({
+                "pair": cand["pair"], "dir": cand["trend"], "entry": cand["entry"],
+                "expiry_min": lvl["expiry_min"],
+                "due_ts": time.time() + lvl["expiry_min"] * 60 + 90,
+            })
+            sent_count += 1
+            print(f"{cand['pair']}: сигнал відправлено "
+                  f"(зона {lvl['level']}, score={cand['score']})")
+        journal_write({
+            "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
+            "pair": cand["pair"].replace("=X", ""),
+            "direction": cand["trend"],
+            "level": lvl["level"],
+            "zone_lo": round(lvl["lo"], 5),
+            "zone_hi": round(lvl["hi"], 5),
+            "entry_price": round(cand["entry"], 5),
+            "expiry_min": lvl["expiry_min"],
+            "score": cand["score"],
+            "strength_pct": round(lvl["strength"] * 100, 1),
+            "er": cand["er"],
+            "trend_source": cand["source"],
+            "sent": sent,
+            "reason": reason,
+        })
+
+
+def process_outcomes(state: dict) -> None:
+    pending = state.get("pending_outcomes", [])
+    if not pending:
+        return
+    now_ts = time.time()
+    still = []
+    for o in pending:
+        if o["due_ts"] > now_ts:
+            still.append(o)
+            continue
+        exit_price = None
+        try:
+            fi = yf.Ticker(o["pair"]).fast_info
+            try:
+                exit_price = float(fi["lastPrice"])
+            except Exception:
+                exit_price = float(fi["last_price"])
+        except Exception as e:
+            print(f"[результат] не вдалось отримати ціну {o['pair']}: {e}")
+            continue
+        win = (exit_price > o["entry"]) if o["dir"] == "BUY" else (exit_price < o["entry"])
+        outcome_write({
+            "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
+            "pair": o["pair"].replace("=X", ""),
+            "direction": o["dir"],
+            "entry_price": round(o["entry"], 5),
+            "exit_price": round(exit_price, 5),
+            "result": "WIN" if win else "LOSS",
+        })
+        print(f"[результат] {o['pair']} {o['dir']}: {'WIN' if win else 'LOSS'}")
+    state["pending_outcomes"] = still
+
+
+def main_once() -> None:
+    if not in_trading_window():
+        print("Поза торговим вікном (10:00-20:00 Kyiv) — пропуск.")
+        return
+    state = load_state()
+    run_cycle(state)
+    save_state(state)
+
+
+def main_loop() -> None:
+    print("Бот запущено в безперервному режимі (loop).")
+    print_outcome_stats()
+    state = load_state()
+    while True:
+        try:
+            if not in_trading_window():
+                print("Поза торговим вікном — пауза.")
+                time.sleep(OUT_OF_WINDOW_SLEEP_SEC)
+                continue
+            process_outcomes(state)
+            run_cycle(state)
+            save_state(state)
+        except KeyboardInterrupt:
+            print("Зупинено користувачем.")
+            save_state(state)
+            break
+        except Exception as e:
+            print(f"[Критична помилка циклу] {e}")
+        time.sleep(CHECK_INTERVAL_SEC)
+
+
+def main() -> None:
+    if RUN_MODE == "loop":
+        main_loop()
+    else:
+        main_once()
+
+
+if __name__ == "__main__":
+    main()
