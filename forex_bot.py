@@ -1,11 +1,11 @@
 """
-Forex Price-Action Signal Bot — v8
+Forex Price-Action Signal Bot — v9
 
 Повна специфікація трейдера + усі калібрування за результатами валідації
 (21 пара на 30m + M5-зони проти VRVP):
 
   M30 (трендовий шар, v7):
-    R1. Фільтр "болота" по вікну 48 свічок (24 год) з діаностикою
+    R1. Фільтр "болота" по вікну 48 свічок (24 год) з діагностикою
         (er, net*ATR) у рядку блокування. Поріг EFFICIENCY_MIN=0.15
         перекалібровано по доказах: рейнджі дають er <= 0.12,
         тренд+відкат >= 0.16 (v7.1).
@@ -13,13 +13,17 @@ Forex Price-Action Signal Bot — v8
         (якщо структури неоднозначні, а глобальний читанний).
     R3. Узгодженість з EMA200, коли глобальний читанний (>= 1 ATR).
 
-  M5 (шар входу, v6-v8):
+  M5 (шар входу, v6-v9):
     Зони-подушки = вузли горизонтального обсягу (наближення VRVP):
     сегментація профілю по долинах LVN; зони неперетинні за побудовою.
     v8: профіль згладжується вікном 3 комірки перед пошуком долин,
-    тому суцільний вузол не фрагментується на тонкі скибки;
-    VALLEY_FRACTION=0.25. Профіль будується по PROFILE_LOOKBACK_5M=350
-    свічок (~29 год), тому POC = справжня основа руху.
+    тому суцільний вузол не фрагментується на тонкі скибки.
+    v9: VALLEY_FRACTION=0.15 — тонкі краї вузлів (40-60% піка) більше
+    не ріжуться як долини, тому ВЕРХНЯ полиця вузла входить у зону:
+    зона 1 сідає на перший ретест, а не на тіло вузла (кейс AUDJPY:
+    зона піднялась з 110.118 до верхньої полиці ~110.18).
+    Профіль будується по PROFILE_LOOKBACK_5M=350 свічок (~29 год),
+    тому POC = справжня основа руху.
     Обсяг зони = "стіна": закрита свічка ЗА зоною = стіна пробита.
     Пробій зони POC = злом: пара покидається на ABANDON_MIN хв.
     Поглинання (v7): якщо ціна "живе" всередині зони (>= DWELL_MAX_CLOSES
@@ -82,12 +86,14 @@ EFFICIENCY_MIN = 0.15              # v7.1: перекалібровано по �
                                    # рейнджі дають er <= 0.12, тренд+відкат >= 0.16
 NET_MOVE_ATR_MIN = 2.0             # чистий зсув за 48 свічок >= 2 ATR
 
-# --- Зони M5 (вузли обсягу, сегментація по долинах; v8: згладжування) ---
+# --- Зони M5 (вузли обсягу, сегментація по долинах; v8-v9) ---
 POC_ZONES = 30
 TOLERANCE_PCT = 0.00015            # буфер на межах зони для факту "входу"
 IMPULSE_LOOKBACK_5M = 150          # вікно імпульсу (край + свіжість)
 PROFILE_LOOKBACK_5M = 350          # вікно профілю зон (~29 год)
-VALLEY_FRACTION = 0.25             # v8: м'якший поріг долини (після згладжування)
+VALLEY_FRACTION = 0.15             # v9: м'якший поріг долини після згладжування:
+                                   # краї вузлів (40-60% піка) не ріжуться,
+                                   # верхня полиця вузла входить у зону 1
 MAX_ZONE_WIDTH_PCT = 0.002         # зона не ширша за 0.2% (ширше = ріжемо по LVN)
 MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1                  # мін. дотиків З КОЖНОГО боку для зони 2
@@ -240,7 +246,7 @@ def analyze_trend_30m(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# ЗОНИ M5: профіль обсягу + сегментація по долинах (v8: зі згладжуванням)
+# ЗОНИ M5: профіль обсягу + сегментація по долинах (v8: згладжування, v9: поріг)
 # ---------------------------------------------------------------------------
 def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
     """Сирий профіль обсягу: комірки {lo, hi, vol, touches, above, below}.
@@ -295,7 +301,9 @@ def build_volume_zones(cells):
     обсягу (LVN), як у TradingView VRVP.
     v8: профіль згладжується вікном 3 комірки перед пошуком долин, тому
     суцільний вузол не фрагментується на тонкі скибки навколо пікових
-    комірок. Зони неперетинні за побудовою (ланцюгове злиття неможливе).
+    комірок. v9: поріг долини 0.15 — тонкі краї вузлів лишаються частиною
+    вузла, тож верхня полиця входить у зону (зона 1 = перший ретест).
+    Зони неперетинні за побудовою (ланцюгове злиття неможливе).
     Занадто широкий сегмент ріжеться по найслабших внутрішніх комірках."""
     raw = [c["vol"] for c in cells]
     total = sum(raw)
@@ -511,339 +519,4 @@ def format_signal(pair: str, trend: str, price: float, level: dict,
         f"Напрямок: {direction}\n"
         f"{level_label}\n"
         f"Зона: <code>{level['lo']:.5f}</code>–<code>{level['hi']:.5f}</code> "
-        f"({side})\n"
-        f"Ціна входу: <code>{price:.5f}</code>\n"
-        f"Експірація: {level['expiry_min']} хв\n"
-        f"Тренд M30: {source} | сила зони: {level['strength'] * 100:.1f}% обсягу\n"
-        f"Score: {score}"
-        f"{warning}\n"
-        f"Час: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)"
-    )
-
-
-def journal_write(row: dict) -> None:
-    new_file = not os.path.exists(JOURNAL_FILE)
-    with open(JOURNAL_FILE, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=JOURNAL_FIELDS)
-        if new_file:
-            w.writeheader()
-        w.writerow(row)
-    print(f"[журнал] {row}")
-
-
-def outcome_write(row: dict) -> None:
-    new_file = not os.path.exists(OUTCOMES_FILE)
-    with open(OUTCOMES_FILE, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=OUTCOME_FIELDS)
-        if new_file:
-            w.writeheader()
-        w.writerow(row)
-
-
-def print_outcome_stats() -> None:
-    if not os.path.exists(OUTCOMES_FILE):
-        return
-    try:
-        df = pd.read_csv(OUTCOMES_FILE)
-    except Exception:
-        return
-    if df.empty:
-        return
-    wins = int((df["result"] == "WIN").sum())
-    losses = int((df["result"] == "LOSS").sum())
-    total = wins + losses
-    if total:
-        print(f"[статистика] результатів: {total}, WIN: {wins} ({wins / total:.0%}), LOSS: {losses}")
-
-
-# ---------------------------------------------------------------------------
-# НОВИНИ
-# ---------------------------------------------------------------------------
-def fetch_high_impact_events():
-    try:
-        resp = requests.get(NEWS_CALENDAR_URL, timeout=15)
-        resp.raise_for_status()
-        events = resp.json()
-    except Exception as e:
-        print(f"[Календар] помилка: {e}")
-        return []
-    out = []
-    for ev in events:
-        if ev.get("impact") != "High" or ev.get("country") not in WATCHED_CURRENCIES:
-            continue
-        try:
-            ev_time = datetime.fromisoformat(ev["date"].replace("Z", "+00:00")).astimezone(TZ)
-        except Exception:
-            continue
-        out.append({"title": ev.get("title", "Подія"),
-                    "currency": ev.get("country"), "time": ev_time})
-    return out
-
-
-def find_relevant_news_window(pair: str, events):
-    clean = pair.replace("=X", "")
-    pair_currencies = {clean[:3], clean[3:6]}
-    now = datetime.now(TZ)
-    for ev in events:
-        if ev["currency"] not in pair_currencies:
-            continue
-        delta_min = (ev["time"] - now).total_seconds() / 60
-        if -NEWS_AFTER_MIN <= delta_min <= NEWS_BEFORE_MIN:
-            return ev
-    return None
-
-
-def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
-    clean_pair = pair.replace("=X", "")
-    key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
-    if state.get(key):
-        return
-    msg = (f"⚠️ <b>Скоро важлива новина: {clean_pair}</b>\n"
-           f"Подія: {event['title']} ({event['currency']})\n"
-           f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
-           f"Рекомендація: не торгувати ~{NEWS_BEFORE_MIN} хв до і "
-           f"~{NEWS_AFTER_MIN} хв після виходу.")
-    send_telegram_message(msg)
-    state[key] = True
-
-
-# ---------------------------------------------------------------------------
-# ОЦІНКА ПАРИ -> КАНДИДАТ
-# ---------------------------------------------------------------------------
-def evaluate_pair(pair: str, state: dict, news_events):
-    news_hit = find_relevant_news_window(pair, news_events)
-    if news_hit:
-        maybe_send_news_warning(pair, news_hit, state)
-        print(f"{pair}: пропуск — поруч новина ({news_hit['title']})")
-        return None
-
-    df30 = fetch_candles(pair, interval="30m", period="30d")
-    if df30.empty:
-        return None
-    trend, source, er = analyze_trend_30m(df30)
-    if trend is None:
-        print(f"{pair}: {source} — сигнали вимкнено")
-        return None
-
-    df5 = fetch_candles(pair, interval="5m", period="5d")
-    if len(df5) < IMPULSE_LOOKBACK_5M:
-        print(f"{pair}: недостатньо даних 5m")
-        return None
-
-    low, high, window = find_last_impulse(df5)
-    if extreme_age(window, trend) < EXTREME_AGE_MIN:
-        print(f"{pair}: імпульс ще свіжий, відкат не почався")
-        return None
-
-    # пара покинута після пробою зони ("злом")
-    if state.get(f"{pair}_abandon_until", 0) > time.time():
-        print(f"{pair}: пара покинула гру після пробою зони — чекаємо")
-        return None
-
-    # профіль зон по довшому вікну, край імпульсу — по короткому
-    profile_window = df5.tail(PROFILE_LOOKBACK_5M)
-    ladder = build_entry_ladder(profile_window, low, high, trend)
-    if not ladder:
-        print(f"{pair}: не вдалось побудувати зони")
-        return None
-
-    # пробій POC-зони = злом: лишаємо пару
-    poc_zone = next(l for l in ladder if l["is_poc"])
-    if zone_broken(poc_zone, df5, trend):
-        state[f"{pair}_abandon_until"] = time.time() + ABANDON_MIN * 60
-        print(f"{pair}: зону POC пробито свічкою — можливий злом, "
-              f"лишаємо пару на {ABANDON_MIN} хв")
-        return None
-
-    # останній вхід (POC) у цьому імпульсі вже зроблено
-    sig = f"{low:.5f}|{high:.5f}"
-    if state.get(f"{pair}_done_sig") == sig:
-        print(f"{pair}: входи цього імпульсу завершено (POC був останнім)")
-        return None
-
-    current_price = float(df5["Close"].iloc[-1])
-    breakout = is_impulsive_breakout(df5, trend)
-
-    if cooldown_active(state, pair):
-        print(f"{pair}: кулдаун активний")
-        return None
-
-    candidate = None
-    for level in ladder:
-        if zone_broken(level, df5, trend):
-            print(f"{pair}: зону {level['level']} пробито — стіна не спрацювала, пропуск")
-            continue
-        if zone_is_dwelling(df5, level):
-            print(f"{pair}: зона {level['level']} — ціна живе всередині "
-                  f"(поглинання), пропуск")
-            continue
-        if not in_zone(current_price, level):
-            continue
-        if not approach_ok(df5, level, trend):
-            print(f"{pair}: ціна в зоні {level['level']}, але вхід не з боку відкату")
-            continue
-        if not is_reaction_candle(df5, trend):
-            print(f"{pair}: ціна в зоні {level['level']}, немає підтвердження відбою")
-            continue
-        if breakout and level["level"] > 1:
-            print(f"{pair}: зона {level['level']} пропущена — імпульсний пробій")
-            continue
-        signal_key = f"{pair}_{trend}_level{level['level']}"
-        if state.get(signal_key, False):
-            continue
-        width = max(level["hi"] - level["lo"], 1e-12)
-        if trend == "BUY":
-            depth = (level["hi"] - current_price) / width
-        else:
-            depth = (current_price - level["lo"]) / width
-        prox = 1.0 - min(1.0, max(0.0, depth))
-        clarity = min(1.0, er / 0.5)
-        score = round(300 * level["strength"] + 20 * prox
-                      + (15 if level["is_poc"] else 0) + 25 * clarity, 1)
-        candidate = {"pair": pair, "trend": trend, "source": source,
-                     "er": round(er, 3), "level": level, "entry": current_price,
-                     "score": score, "breakout": breakout,
-                     "signal_key": signal_key, "sig": sig}
-        break
-
-    if candidate is None:
-        # анти-дубль: прапорці скидаються ЛИШЕ коли ціна вийшла з зони
-        for level in ladder:
-            if not in_zone(current_price, level):
-                state[f"{pair}_{trend}_level{level['level']}"] = False
-        zones_str = [f"{l['lo']:.5f}-{l['hi']:.5f}" for l in ladder]
-        print(f"{pair}: тренд={trend}({source}), ціна={current_price:.5f}, зони={zones_str}")
-    return candidate
-
-
-# ---------------------------------------------------------------------------
-# ПРОГІН
-# ---------------------------------------------------------------------------
-def run_cycle(state: dict) -> None:
-    news_events = fetch_high_impact_events()
-    candidates = []
-    for pair in PAIRS:
-        try:
-            cand = evaluate_pair(pair, state, news_events)
-            if cand:
-                candidates.append(cand)
-        except Exception as e:
-            print(f"[Помилка] {pair}: {e}")
-        time.sleep(BETWEEN_PAIRS_SLEEP_SEC)
-
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    sent_count = 0
-    for cand in candidates:
-        lvl = cand["level"]
-        sent = sent_count < MAX_SIGNALS_PER_RUN
-        reason = "sent" if sent else "ліміт сигналів за прогін"
-        if sent:
-            msg = format_signal(cand["pair"], cand["trend"], cand["entry"],
-                                lvl, cand["breakout"], cand["source"], cand["score"])
-            send_telegram_message(msg)
-            state[cand["signal_key"]] = True
-            mark_signal_sent(state, cand["pair"])
-            if lvl["is_poc"]:
-                state[f"{cand['pair']}_done_sig"] = cand["sig"]  # POC = останній вхід
-            state.setdefault("pending_outcomes", []).append({
-                "pair": cand["pair"], "dir": cand["trend"], "entry": cand["entry"],
-                "expiry_min": lvl["expiry_min"],
-                "due_ts": time.time() + lvl["expiry_min"] * 60 + 90,
-            })
-            sent_count += 1
-            print(f"{cand['pair']}: сигнал відправлено "
-                  f"(зона {lvl['level']}, score={cand['score']})")
-        journal_write({
-            "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
-            "pair": cand["pair"].replace("=X", ""),
-            "direction": cand["trend"],
-            "level": lvl["level"],
-            "zone_lo": round(lvl["lo"], 5),
-            "zone_hi": round(lvl["hi"], 5),
-            "entry_price": round(cand["entry"], 5),
-            "expiry_min": lvl["expiry_min"],
-            "score": cand["score"],
-            "strength_pct": round(lvl["strength"] * 100, 1),
-            "er": cand["er"],
-            "trend_source": cand["source"],
-            "sent": sent,
-            "reason": reason,
-        })
-
-
-def process_outcomes(state: dict) -> None:
-    pending = state.get("pending_outcomes", [])
-    if not pending:
-        return
-    now_ts = time.time()
-    still = []
-    for o in pending:
-        if o["due_ts"] > now_ts:
-            still.append(o)
-            continue
-        exit_price = None
-        try:
-            fi = yf.Ticker(o["pair"]).fast_info
-            try:
-                exit_price = float(fi["lastPrice"])
-            except Exception:
-                exit_price = float(fi["last_price"])
-        except Exception as e:
-            print(f"[результат] не вдалось отримати ціну {o['pair']}: {e}")
-            continue
-        win = (exit_price > o["entry"]) if o["dir"] == "BUY" else (exit_price < o["entry"])
-        outcome_write({
-            "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
-            "pair": o["pair"].replace("=X", ""),
-            "direction": o["dir"],
-            "entry_price": round(o["entry"], 5),
-            "exit_price": round(exit_price, 5),
-            "result": "WIN" if win else "LOSS",
-        })
-        print(f"[результат] {o['pair']} {o['dir']}: {'WIN' if win else 'LOSS'}")
-    state["pending_outcomes"] = still
-
-
-# ---------------------------------------------------------------------------
-# ENTRY POINT
-# ---------------------------------------------------------------------------
-def main_once() -> None:
-    if not in_trading_window():
-        print("Поза торговим вікном (10:00-20:00 Kyiv) — пропуск.")
-        return
-    state = load_state()
-    run_cycle(state)
-    save_state(state)
-
-
-def main_loop() -> None:
-    print("Бот запущено в безперервному режимі (loop).")
-    print_outcome_stats()
-    state = load_state()
-    while True:
-        try:
-            if not in_trading_window():
-                print("Поза торговим вікном — пауза.")
-                time.sleep(OUT_OF_WINDOW_SLEEP_SEC)
-                continue
-            process_outcomes(state)
-            run_cycle(state)
-            save_state(state)
-        except KeyboardInterrupt:
-            print("Зупинено користувачем.")
-            save_state(state)
-            break
-        except Exception as e:
-            print(f"[Критична помилка циклу] {e}")
-        time.sleep(CHECK_INTERVAL_SEC)
-
-
-def main() -> None:
-    if RUN_MODE == "loop":
-        main_loop()
-    else:
-        main_once()
-
-
-if __name__ == "__main__":
-    main()
+        f"({
