@@ -1,5 +1,5 @@
-"""
-Forex Price-Action Signal Bot — v10
+ """
+Forex Price-Action Signal Bot — v11
 """
 import csv
 import json
@@ -41,19 +41,23 @@ GLOBAL_DIST_ATR = 1.0
 EFFICIENCY_MIN = 0.15
 NET_MOVE_ATR_MIN = 2.0
 
+# FIX 10: перевірка "свіжого імпульсу" на 30m — щоб боковик не читався як тренд
+IMPULSE_CONFIRM_LOOKBACK = 8    # останні 8 свічок 30m (~4 години)
+IMPULSE_CONFIRM_REF = 24        # на фоні останніх 24 свічок
+
 POC_ZONES = 30
 TOLERANCE_PCT = 0.00015
 IMPULSE_LOOKBACK_5M = 150
-PROFILE_LOOKBACK_5M = 350
+PROFILE_LOOKBACK_5M = 200       # FIX 13: було 350 — занадто глибоко заглядає в учорашній день
 VALLEY_FRACTION = 0.15
-MAX_ZONE_WIDTH_PCT = 0.002
+MAX_ZONE_WIDTH_PCT = 0.0006     # FIX 11: було 0.002 — зони стануть ~в 3 рази вужчі
 MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1
 MIN_WICK_RATIO = 0.35
 EXTREME_AGE_MIN = 2
 
 DWELL_LOOKBACK = 12
-DWELL_MAX_CLOSES = 4
+DWELL_MAX_CLOSES = 6            # FIX 12: було 4 — занадто легко ловило "поглинання"
 
 SIGNAL_COOLDOWN_MIN = 20
 BREAKOUT_RANGE_MULT = 1.8
@@ -140,6 +144,35 @@ def efficiency_ratio(closes: pd.Series, lookback: int) -> float:
     return abs(w.iloc[-1] - w.iloc[0]) / volatility if volatility > 0 else 0.0
 
 
+# FIX 10: перевірка, що тренд підтверджений СВІЖИМ імпульсом на 30m.
+# Користувач торгує тільки коли ціна "імпульсно обновила максимум/мінімум",
+# а не коли дві половини вікна випадково розташувались у потрібному порядку.
+def recent_impulse_confirms(df: pd.DataFrame, trend: str) -> tuple:
+    if len(df) < IMPULSE_CONFIRM_REF:
+        return False, "мало даних для перевірки імпульсу"
+    window = df.tail(IMPULSE_CONFIRM_REF)
+    recent = df.tail(IMPULSE_CONFIRM_LOOKBACK)
+    net = recent["Close"].iloc[-1] - recent["Close"].iloc[0]
+
+    if trend == "BUY":
+        if net <= 0:
+            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m закрились нижче (нетто-рух вниз)"
+        win_high = window["High"].max()
+        rec_high = recent["High"].max()
+        # недавній максимум має бути максимумом усього вікна (з допуском 1 тік)
+        if rec_high < win_high - 1e-6:
+            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m не оновили максимум вікна"
+        return True, "ok"
+    else:
+        if net >= 0:
+            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m закрились вище (нетто-рух вгору)"
+        win_low = window["Low"].min()
+        rec_low = recent["Low"].min()
+        if rec_low > win_low + 1e-6:
+            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m не оновили мінімум вікна"
+        return True, "ok"
+
+
 def analyze_trend_30m(df: pd.DataFrame):
     if len(df) < CONSOLIDATION_LOOKBACK + 1:
         return None, "мало даних 30m", 0.0
@@ -177,6 +210,12 @@ def analyze_trend_30m(df: pd.DataFrame):
 
     if REQUIRE_GLOBAL_AGREEMENT and global_readable and trend != ema_dir:
         return None, f"неузгодженість: {source} супроти глобального (EMA200)", er
+
+    # FIX 10: обов'язкова перевірка свіжого імпульсу
+    ok, why = recent_impulse_confirms(df, trend)
+    if not ok:
+        return None, f"тренд {trend} ({source}) не підтверджений імпульсом: {why}", er
+
     return trend, source, er
 
 
@@ -212,10 +251,10 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
 
 def split_wide_segment(idx, vols, cells, cap_pct):
     lo_i, hi_i = idx[0], idx[-1]
-    # FIX 5: захист від ділення на нуль
     denom = cells[hi_i]["hi"] or 1.0
     width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / denom
-    if width <= cap_pct or len(idx) <= 2:
+    # FIX 11: дозволяємо дробити до однієї клітинки
+    if width <= cap_pct or len(idx) <= 1:
         return [idx]
     interior = idx[1:-1]
     m = min(interior, key=lambda k: vols[k])
@@ -250,7 +289,6 @@ def build_volume_zones(cells):
         while j + 1 < n and raw[j + 1] > 0 and not is_valley[j + 1]:
             j += 1
         seg = list(range(i, j + 1))
-        # FIX 5: захист від ділення на нуль
         denom = cells[j]["hi"] or 1.0
         width = (cells[j]["hi"] - cells[i]["lo"]) / denom
         if width > MAX_ZONE_WIDTH_PCT:
@@ -280,12 +318,6 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
 
 def build_entry_ladder(window_profile: pd.DataFrame, edge_low: float, edge_high: float,
                        trend: str):
-    # ВАЖЛИВО: гістограма обсягу будується по ПОВНОМУ діапазону вікна профілю
-    # (window_profile), а не по вужчому діапазону останнього імпульсу.
-    # Якщо використати вузький edge_low/edge_high для бакетів — будь-яка
-    # свічка з profile-вікна, що виходить за ці межі, "втискується" у крайню
-    # зону (0 або POC_ZONES-1), створюючи штучний роздутий об'єм на краю,
-    # який може стати фальшивим POC далеко від реальної ціни.
     profile_low = window_profile["Low"].min()
     profile_high = window_profile["High"].max()
     cells = compute_volume_profile(window_profile, profile_low, profile_high)
@@ -294,9 +326,6 @@ def build_entry_ladder(window_profile: pd.DataFrame, edge_low: float, edge_high:
         return []
     poc = max(zones, key=lambda z: z["share"])
     poc_c = (poc["lo"] + poc["hi"]) / 2
-    # edge (край останнього імпульсу) і далі використовується лише для
-    # сортування зон по шляху відкату — це вузький, "свіжий" орієнтир,
-    # і це коректно, бо він лежить всередині ширшого profile-діапазону
     edge = edge_high if trend == "BUY" else edge_low
     others = [z for z in zones if z is not poc]
     if trend == "BUY":
@@ -360,9 +389,6 @@ def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
     return c["Close"] > zone["hi"] * (1 + TOLERANCE_PCT)
 
 
-# FIX 8: is_reaction_candle більше не викликається у головному потоці.
-# Залишено як довідник — на випадок, якщо колись захочеш "м'яку" версію
-# (перевірку хвоста/тіла останньої закритої свічки).
 def is_reaction_candle(df5: pd.DataFrame, trend: str) -> bool:
     if len(df5) < 2:
         return False
@@ -412,7 +438,6 @@ def mark_signal_sent(state: dict, pair: str) -> None:
     state[f"{pair}_last_signal_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
 
 
-# FIX 1: повертає bool — успіх/невдача надсилання
 def send_telegram_message(html_text: str) -> bool:
     if not in_trading_window():
         print("[Telegram] пропущено — поза торговим вікном")
@@ -430,7 +455,6 @@ def format_signal(pair: str, trend: str, price: float, level: dict,
                   breakout: bool, source: str, score: float) -> str:
     clean_pair = pair.replace("=X", "")
     direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
-    # FIX 7: чисті, стабільні лейбли (не залежать від індексу)
     if level["is_poc"]:
         level_label = "🎯 POC (найсильніша зона, ОСТАННІЙ вхід)"
     else:
@@ -524,7 +548,6 @@ def find_relevant_news_window(pair: str, events):
     return None
 
 
-# FIX 2: state сетиться тільки при успішному надсиланні
 def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
     clean_pair = pair.replace("=X", "")
     key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
@@ -573,7 +596,7 @@ def evaluate_pair(pair: str, state: dict, news_events):
         if not isinstance(profile_window, pd.DataFrame) or profile_window.empty:
             print(f"{pair}: некоректні дані для профілю зон")
             return None
-        ladder = build_entry_ladder(profile_window, low, high, trend)  # low/high = edge імпульсу (150 св.)
+        ladder = build_entry_ladder(profile_window, low, high, trend)
     except Exception as e:
         print(f"{pair}: помилка побудови зон: {e}")
         return None
@@ -615,11 +638,6 @@ def evaluate_pair(pair: str, state: dict, news_events):
         if not approach_ok(df5, level, trend):
             print(f"{pair}: ціна в зоні {level['level']}, але вхід не з боку відкату")
             continue
-        # FIX 8: прибрано обов'язкову перевірку is_reaction_candle —
-        # користувач входить одразу при дотику зони, не чекаючи закритої свічки.
-        # FIX 9: прибрано блок `if breakout and level > 1: continue` —
-        # за логікою користувача імпульсний пробій рівня 1 саме і є сигналом
-        # переходити на рівень 2, а не приводом пропустити його.
         signal_key = f"{pair}_{trend}_level{level['level']}"
         if state.get(signal_key, False):
             continue
@@ -639,7 +657,6 @@ def evaluate_pair(pair: str, state: dict, news_events):
         break
 
     if candidate is None:
-        # FIX 6: не залишаємо сміттєвих ключів state, просто видаляємо їх
         for level in ladder:
             if not in_zone(current_price, level):
                 state.pop(f"{pair}_{trend}_level{level['level']}", None)
@@ -662,8 +679,6 @@ def run_cycle(state: dict) -> None:
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     sent_count = 0
-    # FIX 3: сигнал позначається відправленим і пишеться в pending_outcomes
-    # ТІЛЬКИ якщо Telegram реально прийняв повідомлення.
     for cand in candidates:
         lvl = cand["level"]
         allowed = sent_count < MAX_SIGNALS_PER_RUN
@@ -677,7 +692,6 @@ def run_cycle(state: dict) -> None:
                 mark_signal_sent(state, cand["pair"])
                 if lvl["is_poc"]:
                     state[f"{cand['pair']}_done_sig"] = cand["sig"]
-                    # FIX 6: після POC-входу — чистимо прапорці рівнів цієї пари
                     prefix = f"{cand['pair']}_{cand['trend']}_level"
                     for k in [k for k in list(state.keys()) if k.startswith(prefix)]:
                         state.pop(k, None)
@@ -715,8 +729,6 @@ def run_cycle(state: dict) -> None:
         })
 
 
-# FIX 4: невдале отримання ціни більше не губить outcome.
-# Робимо до 5 повторів по хвилині; якщо не вдалось — пишемо UNKNOWN у журнал.
 def process_outcomes(state: dict) -> None:
     pending = state.get("pending_outcomes", [])
     if not pending:
