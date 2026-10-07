@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v14
+Forex Price-Action Signal Bot — v15
 """
 import csv
 import json
@@ -355,16 +355,10 @@ def extreme_age(window: pd.DataFrame, trend: str) -> int:
     return len(window) - 1 - pos
 
 
-# FIX 19: in_zone перевіряє реальний дотик зони, а не "близько".
-# Раніше допуск TOLERANCE_PCT розширював зону з обох боків — через це
-# бот приймав сигнал, коли ціна ще НЕ дійшла до зони (стояла поруч).
-# Тепер допуск застосовується тільки з того боку, з якого ціна має підійти.
 def in_zone(price: float, zone: dict, trend: str) -> bool:
     if trend == "SELL":
-        # ціна має бути в межах зони або трохи нижче (торкнулась опору)
         return zone["lo"] * (1 - TOLERANCE_PCT) <= price <= zone["hi"]
-    else:  # BUY
-        # ціна має бути в межах зони або трохи вище (торкнулась підтримки)
+    else:
         return zone["lo"] <= price <= zone["hi"] * (1 + TOLERANCE_PCT)
 
 
@@ -457,30 +451,98 @@ def send_telegram_message(html_text: str) -> bool:
 
 
 def format_signal(pair: str, trend: str, price: float, level: dict,
-                  breakout: bool, source: str, score: float) -> str:
+                  breakout: bool, source: str, score: float, er: float) -> str:
     clean_pair = pair.replace("=X", "")
-    direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
-    if level["is_poc"]:
-        level_label = "🎯 POC (найсильніша зона, ОСТАННІЙ вхід)"
+
+    if trend == "BUY":
+        direction = "🟢 BUY (CALL)"
+        side = "підтримка"
     else:
-        level_label = f"Рівень {level['level']} (ретест після пробою)"
-    side = "підтримка (вхід зверху)" if trend == "BUY" else "опір (вхід знизу)"
-    warning = ""
+        direction = "🔴 SELL (PUT)"
+        side = "опір"
+
+    if score >= 150:
+        emoji, quality_word = "🔥", "ТОПОВИЙ"
+    elif score >= 80:
+        emoji, quality_word = "🟢", "СИЛЬНИЙ"
+    elif score >= 50:
+        emoji, quality_word = "🟡", "СЕРЕДНІЙ"
+    else:
+        emoji, quality_word = "🟠", "СЛАБКИЙ"
+
+    if level["is_poc"]:
+        level_label = "🎯 POC — останній рубіж (найсильніша зона)"
+    elif level["level"] == 1:
+        level_label = "1️⃣ Рівень 1 — перший ретест після пробою"
+    else:
+        level_label = f"🔁 Рівень {level['level']} — повторний ретест"
+
+    s = float(level["strength"])
+    if s >= 0.25:
+        strength_word = "дуже сильна"
+    elif s >= 0.15:
+        strength_word = "сильна"
+    elif s >= 0.10:
+        strength_word = "середня"
+    elif s >= 0.05:
+        strength_word = "слабка"
+    else:
+        strength_word = "дуже слабка"
+
+    if er >= 0.45:
+        er_word = "дуже сильний тренд"
+    elif er >= 0.30:
+        er_word = "сильний тренд"
+    elif er >= 0.22:
+        er_word = "помірний тренд"
+    else:
+        er_word = "слабкий тренд"
+
+    if source == "structure24":
+        source_word = "свіжий тренд (24 св. M30)"
+    elif source == "structure48":
+        source_word = "старіший тренд (48 св. M30)"
+    elif source == "ema200":
+        source_word = "глобальний напрямок (EMA200)"
+    else:
+        source_word = source
+
+    notes = []
+    if s < 0.08:
+        notes.append("зона слабка по об'єму — не перекривай ставку")
+    if er >= 0.30:
+        notes.append("тренд прямий і сильний — це плюс")
+    elif er < 0.20:
+        notes.append("тренд слабкий — обережно")
+    if level["is_poc"]:
+        notes.append("це POC — останній вхід перед можливим зломом тренду")
+    if level["level"] == 1:
+        notes.append("перший ретест — найменший ризик")
     if breakout:
-        warning = ("\n⚠️ Схоже на імпульсний пробій зони — "
-                   "рекомендована ФІКСОВАНА ставка, без перекриттів.")
+        notes.append("⚠️ схоже на імпульсний пробій — ФІКСОВАНА ставка, без перекриттів")
+    if not notes:
+        notes.append("сигнал стандартний, за твоєю логікою")
+    notes_text = "\n".join(f"• {n}" for n in notes)
+
     return (
-        f"<b>Сигнал: {clean_pair}</b>\n"
+        f"<b>{emoji} СИГНАЛ: {clean_pair} — {quality_word}</b>\n"
         f"Напрямок: {direction}\n"
-        f"{level_label}\n"
-        f"Зона: <code>{level['lo']:.5f}</code>–<code>{level['hi']:.5f}</code> "
-        f"({side})\n"
-        f"Ціна входу: <code>{price:.5f}</code>\n"
-        f"Експірація: {level['expiry_min']} хв\n"
-        f"Тренд M30: {source} | сила зони: {float(level['strength']) * 100:.1f}% обсягу\n"
-        f"Score: {float(score)}"
-        f"{warning}\n"
-        f"Час: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📍 {level_label}\n"
+        f"💰 Зона {side}: <code>{level['lo']:.5f}</code> – <code>{level['hi']:.5f}</code>\n"
+        f"💵 Ціна входу: <code>{price:.5f}</code>\n"
+        f"⏱ Експірація: {level['expiry_min']} хв\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>ЯКІСТЬ СИГНАЛУ</b>\n"
+        f"• Score: <b>{float(score):.0f}</b> (умовний макс ~150)\n"
+        f"• Сила зони: <b>{s * 100:.1f}%</b> ({strength_word})\n"
+        f"• Тренд: <b>{er:.2f}</b> ({er_word})\n"
+        f"• Джерело: {source_word}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <b>ЩО ЦЕ ЗНАЧИТЬ</b>\n"
+        f"{notes_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)"
     )
 
 
@@ -704,7 +766,8 @@ def run_cycle(state: dict) -> None:
         sent_ok = False
         if allowed:
             msg = format_signal(cand["pair"], cand["trend"], cand["entry"],
-                                lvl, cand["breakout"], cand["source"], cand["score"])
+                                lvl, cand["breakout"], cand["source"], cand["score"],
+                                cand["er"])
             sent_ok = send_telegram_message(msg)
             if sent_ok:
                 state[cand["signal_key"]] = True
