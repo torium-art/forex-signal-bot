@@ -5,6 +5,10 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
+concurrency:
+  group: forex-bot
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -35,11 +39,17 @@ jobs:
         run: |
           git config user.name "forex-bot"
           git config user.email "forex-bot@users.noreply.github.com"
+          echo "=== Файли після бота ==="
+          ls -la
+          echo "=== CSV JSON ==="
+          ls -la *.csv *.json 2>/dev/null || echo "немає csv/json"
           git add last_signals.json signals_journal.csv outcomes_journal.csv 2>/dev/null || true
+          echo "=== git status ==="
+          git status
           if git diff --cached --quiet; then
             echo "Нема змін для коміту"
           else
             git commit -m "update bot state [skip ci]"
             git pull --rebase origin main || true
-            git push || true
+            git push
           fi
