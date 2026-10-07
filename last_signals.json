@@ -1,1 +1,1 @@
-{"EURCHF=X_SELL_level1": true, "EURCHF=X_last_signal_at": "2026-10-07 15:38", "pending_outcomes": [{"pair": "EURCHF=X", "dir": "SELL", "entry": 0.9312499761581421, "expiry_min": 5, "due_ts": 1791377070.6200407}]}
+{"EURCHF=X_SELL_level1": true, "EURCHF=X_last_signal_at": "2026-10-07 16:07", "pending_outcomes": [{"pair": "EURCHF=X", "dir": "SELL", "entry": 0.9312499761581421, "expiry_min": 5, "due_ts": 1791377070.6200407}, {"pair": "EURCHF=X", "dir": "SELL", "entry": 0.9316200017929077, "expiry_min": 5, "due_ts": 1791378834.1003256}], "EURCHF=X_SELL_level2": true}
