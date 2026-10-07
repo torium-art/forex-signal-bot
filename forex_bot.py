@@ -255,7 +255,7 @@ def split_wide_segment(idx, vols, cells, cap_pct):
     lo_i, hi_i = idx[0], idx[-1]
     denom = cells[hi_i]["hi"] or 1.0
     width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / denom
-    if width <= cap_pct or len(idx) <= 1:
+    if width <= cap_pct or len(idx) <= 2:
         return [idx]
     interior = idx[1:-1]
     m = min(interior, key=lambda k: vols[k])
