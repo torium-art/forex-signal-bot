@@ -41,9 +41,9 @@ jobs:
           git config user.email "forex-bot@users.noreply.github.com"
           echo "=== Файли після бота ==="
           ls -la
-          echo "=== CSV JSON ==="
-          ls -la *.csv *.json 2>/dev/null || echo "немає csv/json"
-          git add last_signals.json signals_journal.csv outcomes_journal.csv 2>/dev/null || true
+          [ -f last_signals.json ] && git add last_signals.json && echo "added last_signals.json" || echo "no last_signals.json"
+          [ -f signals_journal.csv ] && git add signals_journal.csv && echo "added signals_journal.csv" || echo "no signals_journal.csv"
+          [ -f outcomes_journal.csv ] && git add outcomes_journal.csv && echo "added outcomes_journal.csv" || echo "no outcomes_journal.csv"
           echo "=== git status ==="
           git status
           if git diff --cached --quiet; then
