@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v13
+Forex Price-Action Signal Bot — v14
 """
 import csv
 import json
@@ -55,12 +55,7 @@ MIN_TWO_SIDED = 1
 MIN_WICK_RATIO = 0.35
 EXTREME_AGE_MIN = 2
 
-# FIX 14: мінімальний відкат від екстремуму імпульсу (25%).
 MIN_PULLBACK_FRACTION = 0.25
-
-# FIX 18: м'який поріг score замість жорсткого strength.
-# Бот присилає все, що пройшло базові перевірки (тренд, відкат, зона, ретест).
-# Остаточне рішення — за трейдером.
 MIN_SCORE = 30
 
 DWELL_LOOKBACK = 12
@@ -360,8 +355,17 @@ def extreme_age(window: pd.DataFrame, trend: str) -> int:
     return len(window) - 1 - pos
 
 
-def in_zone(price: float, zone: dict) -> bool:
-    return zone["lo"] * (1 - TOLERANCE_PCT) <= price <= zone["hi"] * (1 + TOLERANCE_PCT)
+# FIX 19: in_zone перевіряє реальний дотик зони, а не "близько".
+# Раніше допуск TOLERANCE_PCT розширював зону з обох боків — через це
+# бот приймав сигнал, коли ціна ще НЕ дійшла до зони (стояла поруч).
+# Тепер допуск застосовується тільки з того боку, з якого ціна має підійти.
+def in_zone(price: float, zone: dict, trend: str) -> bool:
+    if trend == "SELL":
+        # ціна має бути в межах зони або трохи нижче (торкнулась опору)
+        return zone["lo"] * (1 - TOLERANCE_PCT) <= price <= zone["hi"]
+    else:  # BUY
+        # ціна має бути в межах зони або трохи вище (торкнулась підтримки)
+        return zone["lo"] <= price <= zone["hi"] * (1 + TOLERANCE_PCT)
 
 
 def approach_ok(df5: pd.DataFrame, zone: dict, trend: str) -> bool:
@@ -588,7 +592,6 @@ def evaluate_pair(pair: str, state: dict, news_events):
         print(f"{pair}: імпульс ще свіжий, відкат не почався")
         return None
 
-    # FIX 14: мінімальний відкат від екстремуму імпульсу
     impulse_range = high - low
     if impulse_range <= 0:
         print(f"{pair}: імпульс має нульовий діапазон")
@@ -649,7 +652,7 @@ def evaluate_pair(pair: str, state: dict, news_events):
             print(f"{pair}: зона {level['level']} — ціна живе всередині "
                   f"(поглинання), пропуск")
             continue
-        if not in_zone(current_price, level):
+        if not in_zone(current_price, level, trend):
             continue
         if not approach_ok(df5, level, trend):
             print(f"{pair}: ціна в зоні {level['level']}, але вхід не з боку відкату")
@@ -666,8 +669,6 @@ def evaluate_pair(pair: str, state: dict, news_events):
         clarity = min(1.0, er / 0.5)
         score = round(300 * float(level["strength"]) + 20 * prox
                       + (15 if level["is_poc"] else 0) + 25 * clarity, 1)
-        # FIX 18: м'який поріг score — не пропускаємо майже нічого,
-        # залишаємо тільки базову відсічку проти зовсім слабких сигналів.
         if score < MIN_SCORE:
             print(f"{pair}: зона {level['level']} — score {score} < {MIN_SCORE}, пропуск")
             continue
