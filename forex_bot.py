@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v12
+Forex Price-Action Signal Bot — v13
 """
 import csv
 import json
@@ -56,11 +56,12 @@ MIN_WICK_RATIO = 0.35
 EXTREME_AGE_MIN = 2
 
 # FIX 14: мінімальний відкат від екстремуму імпульсу (25%).
-# Без цього бот входив на самому піку імпульсу (як з CADJPY, де було 2.4%).
 MIN_PULLBACK_FRACTION = 0.25
 
-# FIX 15: мінімальна "сила" зони по об'єму. Слабші зони (<7%) пропускаємо.
-MIN_ZONE_STRENGTH = 0.07
+# FIX 18: м'який поріг score замість жорсткого strength.
+# Бот присилає все, що пройшло базові перевірки (тренд, відкат, зона, ретест).
+# Остаточне рішення — за трейдером.
+MIN_SCORE = 30
 
 DWELL_LOOKBACK = 12
 DWELL_MAX_CLOSES = 6
@@ -648,11 +649,6 @@ def evaluate_pair(pair: str, state: dict, news_events):
             print(f"{pair}: зона {level['level']} — ціна живе всередині "
                   f"(поглинання), пропуск")
             continue
-        # FIX 15: слабкі зони (<7% об'єму) не торгуємо
-        if float(level["strength"]) < MIN_ZONE_STRENGTH:
-            print(f"{pair}: зона {level['level']} занадто слабка "
-                  f"({float(level['strength']) * 100:.1f}% об'єму) — пропуск")
-            continue
         if not in_zone(current_price, level):
             continue
         if not approach_ok(df5, level, trend):
@@ -670,6 +666,11 @@ def evaluate_pair(pair: str, state: dict, news_events):
         clarity = min(1.0, er / 0.5)
         score = round(300 * float(level["strength"]) + 20 * prox
                       + (15 if level["is_poc"] else 0) + 25 * clarity, 1)
+        # FIX 18: м'який поріг score — не пропускаємо майже нічого,
+        # залишаємо тільки базову відсічку проти зовсім слабких сигналів.
+        if score < MIN_SCORE:
+            print(f"{pair}: зона {level['level']} — score {score} < {MIN_SCORE}, пропуск")
+            continue
         candidate = {"pair": pair, "trend": trend, "source": source,
                      "er": round(er, 3), "level": level, "entry": current_price,
                      "score": score, "breakout": breakout,
@@ -677,9 +678,6 @@ def evaluate_pair(pair: str, state: dict, news_events):
         break
 
     if candidate is None:
-        for level in ladder:
-            if not in_zone(current_price, level):
-                state.pop(f"{pair}_{trend}_level{level['level']}", None)
         zones_str = [f"{l['lo']:.5f}-{l['hi']:.5f}" for l in ladder]
         print(f"{pair}: тренд={trend}({source}), ціна={current_price:.5f}, зони={zones_str}")
     return candidate
