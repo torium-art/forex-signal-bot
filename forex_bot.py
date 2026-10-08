@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v15
+Forex Price-Action Signal Bot — v16
 """
 import csv
 import json
@@ -863,6 +863,7 @@ def main_once() -> None:
         print("Поза торговим вікном (10:00-20:00 Kyiv) — пропуск.")
         return
     state = load_state()
+    process_outcomes(state)
     run_cycle(state)
     save_state(state)
 
