@@ -1,3 +1,4 @@
 ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pct,er,trend_source,sent,reason
 2026-10-07 15:38,EURCHF,SELL,1,0.931,0.93151,0.93125,5,37.6,5.0,0.25,structure24,True,sent
 2026-10-07 16:07,EURCHF,SELL,2,0.93126,0.93176,0.93162,5,35.9,6.3,0.227,structure24,True,sent
+2026-10-08 10:06,USDCAD,BUY,3,1.42522,1.42597,1.42607,10,213.8,56.4,0.193,structure24,True,sent
