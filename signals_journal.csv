@@ -4,3 +4,4 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-08 10:06,USDCAD,BUY,3,1.42522,1.42597,1.42607,10,213.8,56.4,0.193,structure24,True,sent
 2026-10-08 10:25,GBPUSD,SELL,1,1.32066,1.32095,1.32083,5,47.2,9.3,0.215,structure24,True,sent
 2026-10-08 11:10,GBPUSD,SELL,2,1.32052,1.32081,1.32039,5,44.2,5.0,0.187,structure24,True,sent
+2026-10-08 11:30,GBPUSD,SELL,3,1.32081,1.32153,1.32088,10,191.3,50.2,0.157,structure24,True,sent
