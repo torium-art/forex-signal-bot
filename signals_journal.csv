@@ -7,3 +7,4 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-08 11:30,GBPUSD,SELL,3,1.32081,1.32153,1.32088,10,191.3,50.2,0.157,structure24,True,sent
 2026-10-09 10:26,EURUSD,BUY,2,1.12326,1.12345,1.12347,5,33.6,2.0,0.154,structure24,True,sent
 2026-10-09 16:03,GBPCHF,SELL,2,1.09876,1.09896,1.0989,5,35.3,6.9,0.175,structure48,True,sent
+2026-10-09 16:57,AUDCAD,BUY,1,0.99487,0.99546,0.99544,5,45.6,3.1,0.341,structure24,True,sent
