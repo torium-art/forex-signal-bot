@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v17
+Forex Price-Action Signal Bot — v18
 """
 import csv
 import json
@@ -54,13 +54,11 @@ MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1
 MIN_WICK_RATIO = 0.35
 
-# FIX 2: заміна extreme_age на pullback_started.
-# Стара логіка "скільки свічок від максимуму" блокувала валідні сигнали,
-# бо під час тренду максимум оновлюється кожну свічку → age завжди 0.
-# Нова логіка: "чи ціна вже відійшла від максимуму на X%".
-PULLBACK_THRESHOLD = 0.001   # 0.1% від ціни
+# FIX 2: extreme_age та pullback_started прибрані.
+# Їхню роботу виконує MIN_PULLBACK_FRACTION — він і так перевіряє "чи є відкат".
+# Два фільтри відкату = дублювання, яке блокує валідні сигнали.
 
-MIN_PULLBACK_FRACTION = 0.25
+MIN_PULLBACK_FRACTION = 0.10
 MIN_SCORE = 30
 
 DWELL_LOOKBACK = 12
@@ -352,37 +350,13 @@ def find_last_impulse(df: pd.DataFrame):
     return window["Low"].min(), window["High"].max(), window
 
 
-# FIX 2: нова логіка — питаємо "чи є відкат", а не "скільки свічок від максимуму"
-def pullback_started(window: pd.DataFrame, trend: str,
-                     threshold: float = PULLBACK_THRESHOLD) -> bool:
-    """Чи вже почався відкат від останнього екстремуму?
-
-    Стара логіка (extreme_age) рахувала свічки від максимуму. Але в тренді
-    максимум оновлюється кожну свічку — age ніколи не досягає 2, сигнали
-    блокуються. Нова логіка: дивимось, чи ціна вже відійшла від максимуму
-    хоча б на threshold (0.1% від ціни).
-    """
-    if len(window) < 5:
-        return False
-    if trend == "BUY":
-        peak = window["High"].iloc[-60:].max() if len(window) >= 60 else window["High"].max()
-        current = window["Close"].iloc[-1]
-        return current < peak * (1 - threshold)
-    else:
-        trough = window["Low"].iloc[-60:].min() if len(window) >= 60 else window["Low"].min()
-        current = window["Close"].iloc[-1]
-        return current > trough * (1 + threshold)
-
-
 # FIX 1: виправлено допуск в in_zone.
 # Було: для BUY допуск ВГОРІ (пропускало ціну ВИЩЕ зони — фальшивий сигнал).
 # Стало: для BUY допуск ВНИЗУ (ціна щойно зайшла в зону), для SELL — ВГОРІ.
 def in_zone(price: float, zone: dict, trend: str) -> bool:
     if trend == "BUY":
-        # підтримка: ціна падає зверху, допуск тільки знизу
         return zone["lo"] * (1 - TOLERANCE_PCT) <= price <= zone["hi"]
     else:  # SELL
-        # опір: ціна росте знизу, допуск тільки зверху
         return zone["lo"] <= price <= zone["hi"] * (1 + TOLERANCE_PCT)
 
 
@@ -673,11 +647,6 @@ def evaluate_pair(pair: str, state: dict, news_events):
         return None
 
     low, high, window = find_last_impulse(df5)
-
-    # FIX 2: pullback_started замінює extreme_age
-    if not pullback_started(window, trend):
-        print(f"{pair}: імпульс ще свіжий, відкат не почався")
-        return None
 
     impulse_range = high - low
     if impulse_range <= 0:
