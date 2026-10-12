@@ -14,3 +14,5 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-12 10:21,EURGBP,SELL,3,0.846,0.84645,0.84606,10,266.5,72.8,0.317,structure48,True,sent
 2026-10-12 12:02,USDCAD,BUY,3,1.42528,1.42612,1.42617,10,181.2,45.7,0.18,ema200,True,sent
 2026-10-12 12:44,USDCAD,BUY,3,1.42528,1.42612,1.4259,10,183.5,48.2,0.181,ema200,True,sent
+2026-10-12 14:33,EURAUD,SELL,2,1.60272,1.60338,1.6031,5,65.5,15.8,0.191,structure24,True,sent
+2026-10-12 14:33,GBPCHF,BUY,2,1.10207,1.10226,1.10225,5,42.6,3.4,0.266,structure24,True,sent
