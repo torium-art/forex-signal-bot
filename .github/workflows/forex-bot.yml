@@ -2,12 +2,14 @@ name: Forex Signal Bot
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # FIX 1: некруглі хвилини (3, 8, 13, 18...) — оминаємо пік GitHub :00, :05
+    - cron: "3-58/5 * * * *"
   workflow_dispatch: {}
 
 concurrency:
   group: forex-bot
-  cancel-in-progress: false
+  # FIX 2: cancel-in-progress=true — завислі прогони скасовуються
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -15,16 +17,21 @@ permissions:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    # FIX 3: якщо прогін триває >3 хв — вбиваємо (не блокує наступні)
+    timeout-minutes: 3
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # FIX 4: fetch-depth=1 — швидший checkout (нам не потрібна вся історія)
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          # FIX 5: кеш pip — pandas/yfinance встановлюються з кешу (швидше на 15-20 сек)
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
