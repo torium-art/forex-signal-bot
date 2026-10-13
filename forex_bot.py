@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v18
+Forex Price-Action Signal Bot — v19
 """
 import csv
 import json
@@ -54,10 +54,6 @@ MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1
 MIN_WICK_RATIO = 0.35
 
-# FIX 2: extreme_age та pullback_started прибрані.
-# Їхню роботу виконує MIN_PULLBACK_FRACTION — він і так перевіряє "чи є відкат".
-# Два фільтри відкату = дублювання, яке блокує валідні сигнали.
-
 MIN_PULLBACK_FRACTION = 0.10
 MIN_SCORE = 30
 
@@ -70,6 +66,10 @@ BREAKOUT_LOOKBACK = 20
 LEVEL_EXPIRY_BASE_MIN = 5
 LEVEL_EXPIRY_POC_MIN = 10
 ABANDON_MIN = 60
+
+# FIX 20: daily report о 19:55
+DAILY_REPORT_HOUR = 19
+DAILY_REPORT_MINUTE = 55
 
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEWS_BEFORE_MIN = 25
@@ -350,13 +350,10 @@ def find_last_impulse(df: pd.DataFrame):
     return window["Low"].min(), window["High"].max(), window
 
 
-# FIX 1: виправлено допуск в in_zone.
-# Було: для BUY допуск ВГОРІ (пропускало ціну ВИЩЕ зони — фальшивий сигнал).
-# Стало: для BUY допуск ВНИЗУ (ціна щойно зайшла в зону), для SELL — ВГОРІ.
 def in_zone(price: float, zone: dict, trend: str) -> bool:
     if trend == "BUY":
         return zone["lo"] * (1 - TOLERANCE_PCT) <= price <= zone["hi"]
-    else:  # SELL
+    else:
         return zone["lo"] <= price <= zone["hi"] * (1 + TOLERANCE_PCT)
 
 
@@ -384,20 +381,6 @@ def zone_broken(zone: dict, df5: pd.DataFrame, trend: str) -> bool:
     if trend == "BUY":
         return c["Close"] < zone["lo"] * (1 - TOLERANCE_PCT)
     return c["Close"] > zone["hi"] * (1 + TOLERANCE_PCT)
-
-
-def is_reaction_candle(df5: pd.DataFrame, trend: str) -> bool:
-    if len(df5) < 2:
-        return False
-    c = df5.iloc[-2]
-    rng = c["High"] - c["Low"]
-    if rng <= 0:
-        return False
-    if trend == "BUY":
-        wick = min(c["Open"], c["Close"]) - c["Low"]
-    else:
-        wick = c["High"] - max(c["Open"], c["Close"])
-    return (wick / rng) >= MIN_WICK_RATIO
 
 
 def is_impulsive_breakout(df5: pd.DataFrame, trend: str) -> bool:
@@ -446,6 +429,67 @@ def send_telegram_message(html_text: str) -> bool:
         print(f"[Telegram error] {resp.status_code}: {resp.text}")
         return False
     return True
+
+
+# FIX 20: daily report — підсумок дня в Telegram о 19:55
+def send_daily_report(state: dict) -> None:
+    now = datetime.now(TZ)
+    today = now.strftime("%Y-%m-%d")
+
+    if state.get("last_daily_report") == today:
+        return
+
+    today_signals = []
+    if os.path.exists(JOURNAL_FILE):
+        with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("ts", "").startswith(today):
+                    today_signals.append(row)
+
+    today_outcomes = []
+    if os.path.exists(OUTCOMES_FILE):
+        with open(OUTCOMES_FILE, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("ts", "").startswith(today):
+                    today_outcomes.append(row)
+
+    wins = sum(1 for o in today_outcomes if o.get("result") == "WIN")
+    losses = sum(1 for o in today_outcomes if o.get("result") == "LOSS")
+    total = wins + losses
+
+    msg = f"📊 <b>Підсумок дня: {today}</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"📍 Сигналів: <b>{len(today_signals)}</b>\n"
+    msg += f"✅ WIN: <b>{wins}</b>  |  ❌ LOSS: <b>{losses}</b>\n"
+
+    if total > 0:
+        wr = wins / total * 100
+        emoji = "🔥" if wr >= 60 else "⚠️" if wr < 45 else "🟡"
+        msg += f"📈 Winrate: {emoji} <b>{wr:.1f}%</b>\n"
+
+    if today_signals:
+        msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "🎯 <b>Пари:</b>\n"
+        pairs_count = {}
+        for s in today_signals:
+            p = s.get("pair", "")
+            pairs_count[p] = pairs_count.get(p, 0) + 1
+        for p, c in sorted(pairs_count.items(), key=lambda x: -x[1]):
+            msg += f"• {p}: {c}\n"
+
+    if today_outcomes:
+        msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "📋 <b>Результати:</b>\n"
+        for o in today_outcomes:
+            mark = "✅" if o.get("result") == "WIN" else "❌"
+            msg += f"{mark} {o.get('pair','')} {o.get('direction','')} {o.get('ts','')[11:]}\n"
+
+    msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"⏰ {now.strftime('%H:%M')} (Kyiv)"
+
+    if send_telegram_message(msg):
+        state["last_daily_report"] = today
+        print(f"[daily report] Відправлено за {today}")
 
 
 def format_signal(pair: str, trend: str, price: float, level: dict,
@@ -874,6 +918,13 @@ def main_loop() -> None:
                 continue
             process_outcomes(state)
             run_cycle(state)
+
+            # FIX 20: daily report о 19:55
+            now_check = datetime.now(TZ)
+            if (now_check.hour == DAILY_REPORT_HOUR
+                    and now_check.minute >= DAILY_REPORT_MINUTE):
+                send_daily_report(state)
+
             save_state(state)
         except KeyboardInterrupt:
             print("Зупинено користувачем.")
