@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v19
+Forex Price-Action Signal Bot — v20
 """
 import csv
 import json
@@ -67,11 +67,12 @@ LEVEL_EXPIRY_BASE_MIN = 5
 LEVEL_EXPIRY_POC_MIN = 10
 ABANDON_MIN = 60
 
-# FIX 20: daily report о 19:55
 DAILY_REPORT_HOUR = 19
 DAILY_REPORT_MINUTE = 55
 
+# FIX 21: кеш новин (Forex Factory блокує часті запити)
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+NEWS_CACHE_TTL_HOURS = 4   # оновлювати раз на 4 години
 NEWS_BEFORE_MIN = 25
 NEWS_AFTER_MIN = 20
 WATCHED_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"}
@@ -80,6 +81,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "last_signals.json")
 JOURNAL_FILE = os.path.join(BASE_DIR, "signals_journal.csv")
 OUTCOMES_FILE = os.path.join(BASE_DIR, "outcomes_journal.csv")
+NEWS_CACHE_FILE = os.path.join(BASE_DIR, "ff_calendar_cache.json")
 
 JOURNAL_FIELDS = ["ts", "pair", "direction", "level", "zone_lo", "zone_hi",
                   "entry_price", "expiry_min", "score", "strength_pct", "er",
@@ -431,7 +433,6 @@ def send_telegram_message(html_text: str) -> bool:
     return True
 
 
-# FIX 20: daily report — підсумок дня в Telegram о 19:55
 def send_daily_report(state: dict) -> None:
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
@@ -622,16 +623,52 @@ def print_outcome_stats() -> None:
         print(f"[статистика] результатів: {total}, WIN: {wins} ({wins / total:.0%}), LOSS: {losses}")
 
 
-def fetch_high_impact_events():
+# FIX 21: кеш новин — Forex Factory блокує часті запити (Rate Limited).
+# Рішення: тягнути календар раз на NEWS_CACHE_TTL_HOURS годин.
+# Якщо оновлення не вдалось — використовувати старий кеш.
+def _load_news_cache():
+    if not os.path.exists(NEWS_CACHE_FILE):
+        return None
+    try:
+        with open(NEWS_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[Календар] помилка читання кешу: {e}")
+        return None
+
+
+def _save_news_cache(raw_data):
+    try:
+        cache = {
+            "fetched_at": datetime.now(TZ).isoformat(),
+            "data": raw_data,
+        }
+        with open(NEWS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+        print(f"[Календар] кеш оновлено ({len(raw_data)} подій)")
+    except Exception as e:
+        print(f"[Календар] помилка запису кешу: {e}")
+
+
+def _fetch_news_from_source():
     try:
         resp = requests.get(NEWS_CALENDAR_URL, timeout=15)
-        resp.raise_for_status()
-        events = resp.json()
+        if resp.status_code != 200:
+            print(f"[Календар] HTTP {resp.status_code}")
+            return None
+        text = resp.text.strip()
+        if not text.startswith("[") and not text.startswith("{"):
+            print("[Календар] отримано не JSON (можливо, rate limit)")
+            return None
+        return resp.json()
     except Exception as e:
-        print(f"[Календар] помилка: {e}")
-        return []
+        print(f"[Календар] помилка запиту: {e}")
+        return None
+
+
+def _parse_events(raw_events):
     out = []
-    for ev in events:
+    for ev in raw_events:
         if ev.get("impact") != "High" or ev.get("country") not in WATCHED_CURRENCIES:
             continue
         try:
@@ -641,6 +678,37 @@ def fetch_high_impact_events():
         out.append({"title": ev.get("title", "Подія"),
                     "currency": ev.get("country"), "time": ev_time})
     return out
+
+
+def fetch_high_impact_events():
+    now = datetime.now(TZ)
+    cache = _load_news_cache()
+
+    # 1. Кеш свіжий — використовуємо
+    if cache is not None:
+        fetched_at = cache.get("fetched_at")
+        if fetched_at:
+            try:
+                fetched_dt = datetime.fromisoformat(fetched_at)
+                age_hours = (now - fetched_dt).total_seconds() / 3600
+                if age_hours < NEWS_CACHE_TTL_HOURS:
+                    return _parse_events(cache.get("data", []))
+            except Exception:
+                pass
+
+    # 2. Кеш старий або відсутній — пробуємо оновити
+    raw = _fetch_news_from_source()
+    if raw is not None:
+        _save_news_cache(raw)
+        return _parse_events(raw)
+
+    # 3. Оновити не вдалось — використовуємо старий кеш (якщо є)
+    if cache is not None:
+        print("[Календар] оновлення не вдалось, використовуємо старий кеш")
+        return _parse_events(cache.get("data", []))
+
+    print("[Календар] немає даних (ні кешу, ні свіжих)")
+    return []
 
 
 def find_relevant_news_window(pair: str, events):
@@ -919,7 +987,6 @@ def main_loop() -> None:
             process_outcomes(state)
             run_cycle(state)
 
-            # FIX 20: daily report о 19:55
             now_check = datetime.now(TZ)
             if (now_check.hour == DAILY_REPORT_HOUR
                     and now_check.minute >= DAILY_REPORT_MINUTE):
