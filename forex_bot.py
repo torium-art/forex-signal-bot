@@ -1,5 +1,6 @@
 """
-Forex Price-Action Signal Bot — v20
+Forex Price-Action Signal Bot — v21
+FIX 22: POC-інверсія в build_entry_ladder
 """
 import csv
 import json
@@ -70,9 +71,8 @@ ABANDON_MIN = 60
 DAILY_REPORT_HOUR = 19
 DAILY_REPORT_MINUTE = 55
 
-# FIX 21: кеш новин (Forex Factory блокує часті запити)
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-NEWS_CACHE_TTL_HOURS = 4   # оновлювати раз на 4 години
+NEWS_CACHE_TTL_HOURS = 4
 NEWS_BEFORE_MIN = 25
 NEWS_AFTER_MIN = 20
 WATCHED_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"}
@@ -160,7 +160,7 @@ def recent_impulse_confirms(df: pd.DataFrame, trend: str) -> tuple:
 
     if trend == "BUY":
         if net <= 0:
-            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m закрились нижче (нетто-рух вниз)"
+            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m закрились нижче"
         win_high = window["High"].max()
         rec_high = recent["High"].max()
         if rec_high < win_high - 1e-6:
@@ -168,7 +168,7 @@ def recent_impulse_confirms(df: pd.DataFrame, trend: str) -> tuple:
         return True, "ok"
     else:
         if net >= 0:
-            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m закрились вище (нетто-рух вгору)"
+            return False, f"останні {IMPULSE_CONFIRM_LOOKBACK} св. 30m закрились вище"
         win_low = window["Low"].min()
         rec_low = recent["Low"].min()
         if rec_low > win_low + 1e-6:
@@ -209,7 +209,7 @@ def analyze_trend_30m(df: pd.DataFrame):
     if trend is None and global_readable:
         trend, source = ema_dir, "ema200"
     if trend is None:
-        return None, "немає чіткого тренда (структури 24/48 неоднозначні)", er
+        return None, "немає чіткого тренда", er
 
     if REQUIRE_GLOBAL_AGREEMENT and global_readable and trend != ema_dir:
         return None, f"неузгодженість: {source} супроти глобального (EMA200)", er
@@ -317,6 +317,10 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
             "expiry_min": LEVEL_EXPIRY_POC_MIN if is_poc else LEVEL_EXPIRY_BASE_MIN}
 
 
+# FIX 22: зони будуються МІЖ POC і поточною ціною, а не між POC і edge імпульсу.
+# Було: edge = max/min імпульсу → при ціні на максимумі зони опинялись ВИЩЕ
+# поточної ціни → фальшиві BUY (4 випадки за тиждень: EURUSD, USDCAD, EURAUD, AUDUSD).
+# Стало: якщо POC не з того боку від ціни — сетап невалідний (порожній ladder).
 def build_entry_ladder(window_profile: pd.DataFrame, edge_low: float, edge_high: float,
                        trend: str):
     profile_low = window_profile["Low"].min()
@@ -327,13 +331,23 @@ def build_entry_ladder(window_profile: pd.DataFrame, edge_low: float, edge_high:
         return []
     poc = max(zones, key=lambda z: z["share"])
     poc_c = (poc["lo"] + poc["hi"]) / 2
-    edge = edge_high if trend == "BUY" else edge_low
     others = [z for z in zones if z is not poc]
+
+    current_price = float(window_profile["Close"].iloc[-1])
+
     if trend == "BUY":
-        path = [z for z in others if poc_c <= (z["lo"] + z["hi"]) / 2 <= edge]
+        # POC має бути НИЖЧЕ поточної ціни (підтримка, до якої ціна відкотиться)
+        if poc_c >= current_price:
+            return []
+        path = [z for z in others
+                if poc_c <= (z["lo"] + z["hi"]) / 2 <= current_price]
         path.sort(key=lambda z: -(z["lo"] + z["hi"]) / 2)
-    else:
-        path = [z for z in others if edge <= (z["lo"] + z["hi"]) / 2 <= poc_c]
+    else:  # SELL
+        # POC має бути ВИЩЕ поточної ціни (опір, до якого ціна відкотиться)
+        if poc_c <= current_price:
+            return []
+        path = [z for z in others
+                if current_price <= (z["lo"] + z["hi"]) / 2 <= poc_c]
         path.sort(key=lambda z: (z["lo"] + z["hi"]) / 2)
 
     ladder = []
@@ -623,9 +637,6 @@ def print_outcome_stats() -> None:
         print(f"[статистика] результатів: {total}, WIN: {wins} ({wins / total:.0%}), LOSS: {losses}")
 
 
-# FIX 21: кеш новин — Forex Factory блокує часті запити (Rate Limited).
-# Рішення: тягнути календар раз на NEWS_CACHE_TTL_HOURS годин.
-# Якщо оновлення не вдалось — використовувати старий кеш.
 def _load_news_cache():
     if not os.path.exists(NEWS_CACHE_FILE):
         return None
@@ -684,7 +695,6 @@ def fetch_high_impact_events():
     now = datetime.now(TZ)
     cache = _load_news_cache()
 
-    # 1. Кеш свіжий — використовуємо
     if cache is not None:
         fetched_at = cache.get("fetched_at")
         if fetched_at:
@@ -696,13 +706,11 @@ def fetch_high_impact_events():
             except Exception:
                 pass
 
-    # 2. Кеш старий або відсутній — пробуємо оновити
     raw = _fetch_news_from_source()
     if raw is not None:
         _save_news_cache(raw)
         return _parse_events(raw)
 
-    # 3. Оновити не вдалось — використовуємо старий кеш (якщо є)
     if cache is not None:
         print("[Календар] оновлення не вдалось, використовуємо старий кеш")
         return _parse_events(cache.get("data", []))
@@ -789,7 +797,7 @@ def evaluate_pair(pair: str, state: dict, news_events):
         return None
 
     if not ladder:
-        print(f"{pair}: не вдалось побудувати зони")
+        print(f"{pair}: POC не з того боку ціни — сетап невалідний (FIX 22)")
         return None
 
     poc_zone = next(l for l in ladder if l["is_poc"])
