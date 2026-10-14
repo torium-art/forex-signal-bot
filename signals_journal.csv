@@ -48,3 +48,5 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-14 13:51,AUDCHF,BUY,2,0.58395,0.5841,0.58405,5,42.3,3.0,0.403,structure24,True,sent
 2026-10-14 14:23,GBPCHF,BUY,2,1.10508,1.10535,1.10528,5,40.6,4.0,0.267,structure48,True,sent
 2026-10-14 15:42,EURAUD,SELL,1,1.59556,1.59615,1.59627,5,30.5,3.6,0.391,structure24,True,sent
+2026-10-14 15:58,GBPCHF,BUY,1,1.10572,1.10588,1.10582,5,37.7,2.8,0.328,structure48,True,sent
+2026-10-14 16:45,GBPAUD,SELL,1,1.89192,1.89273,1.89206,5,74.0,16.0,0.192,structure24,True,sent
