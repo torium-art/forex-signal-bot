@@ -57,3 +57,4 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-15 10:10,AUDCHF,SELL,1,0.57579,0.5764,0.5759,5,82.1,15.0,0.417,structure24,True,sent
 2026-10-15 10:10,AUDCAD,SELL,1,0.98585,0.98653,0.98601,5,50.3,4.6,0.427,structure24,True,sent
 2026-10-15 12:11,AUDJPY,SELL,1,109.3597,109.40227,109.36,5,49.0,1.9,0.467,structure24,True,sent
+2026-10-15 13:29,EURAUD,BUY,1,1.61906,1.62068,1.61989,5,56.0,6.9,0.501,structure24,True,sent
