@@ -1,9 +1,11 @@
 """
-Forex Price-Action Signal Bot — v22
+Forex Price-Action Signal Bot — v23
 FIX 22: POC-інверсія
 FIX 23: soft-log (strength_bucket, ATR, hour, day, CPI)
 FIX 24: трекінг траєкторії (7 точок × 2 хв)
 FIX 25: health-check + weekly tech report
+FIX 26: ATR-залежна ширина зони (замість % від ціни)
+FIX 27: мінімум 3 зони в ladder (рівень 1 + рівень 2 + POC)
 """
 import csv
 import json
@@ -53,13 +55,17 @@ TOLERANCE_PCT = 0.00015
 IMPULSE_LOOKBACK_5M = 150
 PROFILE_LOOKBACK_5M = 200
 VALLEY_FRACTION = 0.15
-MAX_ZONE_WIDTH_PCT = 0.0006
+# FIX 26: замість MAX_ZONE_WIDTH_PCT (0.06% від ціни — ламалось на JPY)
+MAX_ZONE_WIDTH_ATR = 1.5   # ширина зони = 1.5 × ATR(14)
 MIN_ZONE_TOUCHES = 4
 MIN_TWO_SIDED = 1
 MIN_WICK_RATIO = 0.35
 
 MIN_PULLBACK_FRACTION = 0.10
 MIN_SCORE = 30
+
+# FIX 27: мінімум зон у ladder
+MIN_LADDER_ZONES = 3
 
 DWELL_LOOKBACK = 12
 DWELL_MAX_CLOSES = 6
@@ -73,7 +79,7 @@ ABANDON_MIN = 60
 
 DAILY_REPORT_HOUR = 19
 DAILY_REPORT_MINUTE = 55
-WEEKLY_REPORT_DAY = 6   # неділя
+WEEKLY_REPORT_DAY = 6
 WEEKLY_REPORT_HOUR = 20
 
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -82,10 +88,8 @@ NEWS_BEFORE_MIN = 25
 NEWS_AFTER_MIN = 20
 WATCHED_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"}
 
-# FIX 24: трекінг траєкторії — 7 точок кожні 2 хв
-TRAJECTORY_POINTS = [2, 4, 6, 8, 10, 12, 14]   # хв
+TRAJECTORY_POINTS = [2, 4, 6, 8, 10, 12, 14]
 
-# FIX 25: health-check
 TRACKING_HEALTH_HOURS = 24
 TRACKING_EMERGENCY_HOURS = 48
 
@@ -143,7 +147,6 @@ def fetch_candles(pair: str, interval: str, period: str) -> pd.DataFrame:
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
-    """ATR за останні period свічок."""
     if len(df) < period:
         return 0.0
     high = df["High"].tail(period)
@@ -158,7 +161,6 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
 
 
 def compute_atr_ratio(df: pd.DataFrame, period: int = 14, avg_period: int = 20) -> float:
-    """ATR / середній ATR за останні avg_period значень ATR."""
     if len(df) < period + avg_period:
         return 1.0
     high = df["High"]
@@ -187,7 +189,6 @@ def classify_strength(strength: float) -> str:
 
 
 def is_cpi_day_today(news_events) -> bool:
-    """Чи сьогодні день з US CPI (High impact)."""
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     for ev in news_events:
         if ev.get("currency") != "USD":
@@ -321,21 +322,22 @@ def compute_volume_profile(window: pd.DataFrame, low: float, high: float):
     return cells
 
 
-def split_wide_segment(idx, vols, cells, cap_pct):
+# FIX 26: split_wide_segment тепер використовує АБСОЛЮТНУ ширину (не відсоток)
+def split_wide_segment(idx, vols, cells, cap_width):
     lo_i, hi_i = idx[0], idx[-1]
-    denom = cells[hi_i]["hi"] or 1.0
-    width = (cells[hi_i]["hi"] - cells[lo_i]["lo"]) / denom
-    if width <= cap_pct or len(idx) <= 2:
+    width = cells[hi_i]["hi"] - cells[lo_i]["lo"]
+    if width <= cap_width or len(idx) <= 2:
         return [idx]
     interior = idx[1:-1]
     m = min(interior, key=lambda k: vols[k])
     left = [k for k in idx if k <= m]
     right = [k for k in idx if k > m]
-    return (split_wide_segment(left, vols, cells, cap_pct)
-            + split_wide_segment(right, vols, cells, cap_pct))
+    return (split_wide_segment(left, vols, cells, cap_width)
+            + split_wide_segment(right, vols, cells, cap_width))
 
 
-def build_volume_zones(cells):
+# FIX 26: build_volume_zones приймає max_width
+def build_volume_zones(cells, max_width):
     raw = [c["vol"] for c in cells]
     total = sum(raw)
     if total <= 0:
@@ -360,10 +362,9 @@ def build_volume_zones(cells):
         while j + 1 < n and raw[j + 1] > 0 and not is_valley[j + 1]:
             j += 1
         seg = list(range(i, j + 1))
-        denom = cells[j]["hi"] or 1.0
-        width = (cells[j]["hi"] - cells[i]["lo"]) / denom
-        if width > MAX_ZONE_WIDTH_PCT:
-            pieces = split_wide_segment(seg, vols, cells, MAX_ZONE_WIDTH_PCT)
+        width = cells[j]["hi"] - cells[i]["lo"]
+        if width > max_width:
+            pieces = split_wide_segment(seg, vols, cells, max_width)
         else:
             pieces = [seg]
         for piece in pieces:
@@ -387,12 +388,19 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
             "expiry_min": LEVEL_EXPIRY_POC_MIN if is_poc else LEVEL_EXPIRY_BASE_MIN}
 
 
+# FIX 26 + FIX 27: ATR-залежна ширина + мінімум 3 зони
 def build_entry_ladder(window_profile: pd.DataFrame, trend: str):
-    """FIX 22: зони МІЖ POC і поточною ціною."""
     profile_low = window_profile["Low"].min()
     profile_high = window_profile["High"].max()
+
+    atr = compute_atr(window_profile, 14)
+    if atr <= 0:
+        return []
+    max_width = MAX_ZONE_WIDTH_ATR * atr
+
     cells = compute_volume_profile(window_profile, profile_low, profile_high)
-    zones = [z for z in build_volume_zones(cells) if z["touches"] >= MIN_ZONE_TOUCHES]
+    zones = [z for z in build_volume_zones(cells, max_width)
+             if z["touches"] >= MIN_ZONE_TOUCHES]
     if not zones:
         return []
     poc = max(zones, key=lambda z: z["share"])
@@ -421,6 +429,11 @@ def build_entry_ladder(window_profile: pd.DataFrame, trend: str):
         if two_sided:
             ladder.append(_mk_level(len(ladder) + 1, two_sided[0], False))
     ladder.append(_mk_level(len(ladder) + 1, poc, True))
+
+    # FIX 27: тільки повні сетапи
+    if len(ladder) < MIN_LADDER_ZONES:
+        return []
+
     return ladder
 
 
@@ -510,12 +523,7 @@ def send_telegram_message(html_text: str) -> bool:
     return True
 
 
-# ============================================================
-# FIX 24: ТРЕКІНГ ТРАЄКТОРІЇ
-# ============================================================
-
 def start_trajectory(state: dict, cand: dict, meta: dict) -> None:
-    """Стартувати трекінг траєкторії для сигналу."""
     now_ts = time.time()
     checks = [{"min": m, "due_ts": now_ts + m * 60, "price": None}
               for m in TRAJECTORY_POINTS]
@@ -535,7 +543,6 @@ def start_trajectory(state: dict, cand: dict, meta: dict) -> None:
 
 
 def process_trajectory(state: dict) -> None:
-    """Записати ціни для точок, які вже дозріли."""
     pending = state.get("pending_trajectory", [])
     if not pending:
         return
@@ -549,7 +556,6 @@ def process_trajectory(state: dict) -> None:
             if now_ts < check["due_ts"]:
                 all_done = False
                 continue
-            # час настав — тягнемо ціну
             try:
                 fi = yf.Ticker(traj["pair"]).fast_info
                 try:
@@ -561,7 +567,6 @@ def process_trajectory(state: dict) -> None:
                 print(f"[trajectory] {traj['pair']}: помилка {e}")
                 all_done = False
         if all_done:
-            # всі 7 точок зібрані — записати в CSV
             _write_trajectory(traj)
         else:
             still.append(traj)
@@ -569,7 +574,6 @@ def process_trajectory(state: dict) -> None:
 
 
 def _write_trajectory(traj: dict) -> None:
-    """Записати завершену траєкторію в CSV."""
     row = {
         "signal_ts": traj["signal_ts"],
         "pair": traj["pair"].replace("=X", ""),
@@ -582,11 +586,9 @@ def _write_trajectory(traj: dict) -> None:
         "day_of_week": traj["day_of_week"],
         "is_cpi_day": traj["is_cpi_day"],
     }
-    # ціни по точках
     for check in traj["checks"]:
         m = check["min"]
         row[f"p{m}m"] = check["price"]
-        # результат: WIN якщо ціна в наш бік
         if check["price"] is None:
             row[f"res{m}m"] = "UNKNOWN"
         elif traj["direction"] == "BUY":
@@ -603,19 +605,11 @@ def _write_trajectory(traj: dict) -> None:
     print(f"[trajectory] записано {traj['pair']}")
 
 
-# ============================================================
-# FIX 25: HEALTH-CHECK + WEEKLY REPORT
-# ============================================================
-
 def check_tracking_health(state: dict) -> None:
-    """Перевірити свіжість trajectory_journal.csv. Алерт якщо >24 год."""
     if not os.path.exists(TRAJECTORY_FILE):
-        # файл ще не створений — це ОК на старті
         return
     mtime = os.path.getmtime(TRAJECTORY_FILE)
     age_hours = (time.time() - mtime) / 3600
-
-    # Алерт раз на добу
     last_alert = state.get("last_health_alert", 0)
     if age_hours > TRACKING_HEALTH_HOURS and (time.time() - last_alert) > 86400:
         msg = (f"⚠️ <b>Трекінг не пише {age_hours:.0f} год</b>\n"
@@ -623,19 +617,16 @@ def check_tracking_health(state: dict) -> None:
                f"Перевір бота в Termux.")
         if send_telegram_message(msg):
             state["last_health_alert"] = time.time()
-
-    # Emergency stop
     if age_hours > TRACKING_EMERGENCY_HOURS:
         last_emergency = state.get("last_emergency_alert", 0)
         if (time.time() - last_emergency) > 86400:
             msg = (f"🚨 <b>ТРЕКІНГ МЕРТВИЙ >{TRACKING_EMERGENCY_HOURS} год</b>\n"
-                   f"ПОТРІБНА ДІЯ. Перевір Termux і перезапусти бота.")
+                   f"ПОТРІБНА ДІЯ.")
             if send_telegram_message(msg):
                 state["last_emergency_alert"] = time.time()
 
 
 def send_weekly_tech_report(state: dict) -> None:
-    """Раз на тиждень (неділя 20:00) — технічний звіт."""
     now = datetime.now(TZ)
     if now.weekday() != WEEKLY_REPORT_DAY or now.hour != WEEKLY_REPORT_HOUR:
         return
@@ -643,7 +634,6 @@ def send_weekly_tech_report(state: dict) -> None:
     if state.get("last_weekly_report") == week_key:
         return
 
-    # Порахувати за тиждень
     week_ago = now - timedelta(days=7)
     total_signals = 0
     total_trajectories = 0
@@ -668,14 +658,13 @@ def send_weekly_tech_report(state: dict) -> None:
 
     msg = (f"📊 <b>Тижневий технічний звіт</b>\n"
            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-           f"• Сигналів за тиждень: <b>{total_signals}</b>\n"
-           f"• Траєкторій записано: <b>{total_trajectories}</b>\n"
+           f"• Сигналів: <b>{total_signals}</b>\n"
+           f"• Траєкторій: <b>{total_trajectories}</b>\n"
            f"• Health: {'✅ OK' if total_trajectories > 0 else '⚠️ немає даних'}\n"
            f"━━━━━━━━━━━━━━━━━━━━━━\n"
            f"⏰ {now.strftime('%Y-%m-%d %H:%M')} (Kyiv)")
     if send_telegram_message(msg):
         state["last_weekly_report"] = week_key
-        print(f"[weekly] відправлено за {week_key}")
 
 
 def send_daily_report(state: dict) -> None:
@@ -702,7 +691,6 @@ def send_daily_report(state: dict) -> None:
     losses = sum(1 for o in today_outcomes if o.get("result") == "LOSS")
     total = wins + losses
 
-    # Скільки траєкторій за сьогодні
     today_trajectories = 0
     if os.path.exists(TRAJECTORY_FILE):
         with open(TRAJECTORY_FILE, "r", encoding="utf-8") as f:
@@ -742,7 +730,6 @@ def send_daily_report(state: dict) -> None:
 
     if send_telegram_message(msg):
         state["last_daily_report"] = today
-        print(f"[daily report] відправлено за {today}")
 
 
 def format_signal(pair: str, trend: str, price: float, level: dict,
@@ -874,10 +861,6 @@ def print_outcome_stats() -> None:
     if total:
         print(f"[статистика] результатів: {total}, WIN: {wins} ({wins / total:.0%}), LOSS: {losses}")
 
-
-# ============================================================
-# NEWS (кеш)
-# ============================================================
 
 def _load_news_cache():
     if not os.path.exists(NEWS_CACHE_FILE):
@@ -1028,7 +1011,7 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         return None
 
     if not ladder:
-        print(f"{pair}: POC не з того боку ціни (FIX 22)")
+        print(f"{pair}: неповний сетап (FIX 26/27)")
         return None
 
     poc_zone = next(l for l in ladder if l["is_poc"])
@@ -1049,7 +1032,6 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         print(f"{pair}: кулдаун")
         return None
 
-    # FIX 23: обчислити ATR і метадані
     atr_ratio = compute_atr_ratio(df5, 14, 20)
     now_dt = datetime.now(TZ)
     hour_utc = now_dt.astimezone(ZoneInfo("UTC")).hour
@@ -1134,7 +1116,6 @@ def run_cycle(state: dict) -> None:
                     "strength_pct": float(round(float(lvl["strength"]) * 100, 2)),
                     "atr_ratio": cand.get("atr_ratio", 1.0),
                 })
-                # FIX 24: старт трекінгу траєкторії
                 start_trajectory(state, cand, {
                     "atr_ratio": cand.get("atr_ratio", 1.0),
                     "hour_utc": cand.get("hour_utc", 0),
@@ -1237,7 +1218,7 @@ def main_once() -> None:
 
 
 def main_loop() -> None:
-    print("Бот v22 запущено (loop).")
+    print("Бот v23 запущено (loop).")
     print_outcome_stats()
     state = load_state()
     while True:
@@ -1255,7 +1236,6 @@ def main_loop() -> None:
                     and now_check.minute >= DAILY_REPORT_MINUTE):
                 send_daily_report(state)
 
-            # FIX 25: health-check і weekly report
             check_tracking_health(state)
             send_weekly_tech_report(state)
 
