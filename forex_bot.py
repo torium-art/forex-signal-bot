@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v25
+Forex Price-Action Signal Bot — v26
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -75,7 +75,7 @@ BREAKOUT_LOOKBACK = 20
 
 # Твоя логіка експірації!
 LEVEL_EXPIRY_BASE_MIN = 5   # Рівень 1
-LEVEL_EXPIRY_MID_MIN = 10   # Рівень 2
+LEVEL_EXPIRY_MID_MIN = 15   # Рівень 2
 LEVEL_EXPIRY_POC_MIN = 15   # POC
 
 ABANDON_MIN = 60
