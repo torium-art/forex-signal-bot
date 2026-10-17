@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v26
+Forex Price-Action Signal Bot — v27
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -7,7 +7,8 @@ FIX 25: health-check + weekly tech report
 FIX 26: ATR-залежна ширина зони
 FIX 27: мінімум 3 зони в ladder
 FIX 28: примусове розбиття широких зон
-FIX 29: фіксація драбини в state (входи на рівнях 1, 2, POC)
+FIX 29: фіксація драбини в state
+FIX 30: швидкий кулдаун (3 хв) та логіка мартингейлу (done_sig після WIN/POC)
 """
 import csv
 import json
@@ -69,16 +70,16 @@ MIN_LADDER_ZONES = 3
 DWELL_LOOKBACK = 12
 DWELL_MAX_CLOSES = 6
 
-SIGNAL_COOLDOWN_MIN = 20
+SIGNAL_COOLDOWN_MIN = 3  # FIX 30: Швидкий кулдаун для мартингейлу
 BREAKOUT_RANGE_MULT = 1.8
 BREAKOUT_LOOKBACK = 20
 
-# Твоя логіка експірації!
+# Логіка експірації
 LEVEL_EXPIRY_BASE_MIN = 5   # Рівень 1
 LEVEL_EXPIRY_MID_MIN = 15   # Рівень 2
 LEVEL_EXPIRY_POC_MIN = 15   # POC
 
-ABANDON_MIN = 60
+ABANDON_MIN = 30 # FIX 30: Пауза після POC (було 60, зробили 30 за твоїм запитом)
 
 DAILY_REPORT_HOUR = 19
 DAILY_REPORT_MINUTE = 55
@@ -620,13 +621,26 @@ def send_daily_report(state: dict) -> None:
 def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bool, source: str, score: float, er: float) -> str:
     clean_pair = pair.replace("=X", "")
     direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
-    level_label = "🎯 POC" if level["is_poc"] else f"🔁 Рівень {level['level']}"
+    
+    # Чітке відображення рівня для мартингейлу
+    if level["level"] == 1:
+        level_label = "1️⃣ Рівень 1 (Базовий вхід)"
+    elif level["level"] == 2:
+        level_label = "2️⃣ Рівень 2 (Перекриття х2)"
+    else:
+        level_label = "3️⃣ Рівень 3 / POC (Фінальне перекриття)"
+        
     s = float(level["strength"])
     return (
-        f"<b>СИГНАЛ: {clean_pair}</b>\n{direction}\n{level_label}\n"
-        f"Зона: <code>{level['lo']:.5f} - {level['hi']:.5f}</code>\n"
-        f"Вхід: <code>{price:.5f}</code> | Експ: {level['expiry_min']} хв\n"
-        f"Score: {score:.0f} | Strength: {s*100:.1f}%"
+        f"<b>🚨 СИГНАЛ: {clean_pair}</b>\n"
+        f"{direction}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📍 <b>{level_label}</b>\n"
+        f"💰 Зона: <code>{level['lo']:.5f} - {level['hi']:.5f}</code>\n"
+        f"💵 Вхід: <code>{price:.5f}</code>\n"
+        f"⏱ Експірація: {level['expiry_min']} хв\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Score: {score:.0f} | Strength: {s*100:.1f}%"
     )
 
 
@@ -776,7 +790,8 @@ def run_cycle(state: dict) -> None:
             state.setdefault("pending_outcomes", []).append({
                 "pair": cand["pair"], "dir": cand["trend"], "entry": cand["entry"],
                 "expiry_min": lvl["expiry_min"], "due_ts": time.time() + lvl["expiry_min"] * 60 + 90,
-                "strength_pct": float(round(float(lvl["strength"]) * 100, 2)), "atr_ratio": cand.get("atr_ratio", 1.0)})
+                "strength_pct": float(round(float(lvl["strength"]) * 100, 2)), "atr_ratio": cand.get("atr_ratio", 1.0),
+                "level": lvl["level"], "sig": cand["sig"]})
             start_trajectory(state, cand, cand)
             sent_count += 1
         journal_write({
@@ -807,6 +822,19 @@ def process_outcomes(state: dict) -> None:
                            "direction": o["dir"], "entry_price": float(round(o["entry"], 5)),
                            "exit_price": float(round(exit_price, 5)), "result": "WIN" if win else "LOSS",
                            "strength_pct": o.get("strength_pct", ""), "atr_ratio": o.get("atr_ratio", "")})
+            print(f"[результат] {o['pair']} {o['dir']} L{o.get('level')}: {'WIN' if win else 'LOSS'}")
+            
+            # FIX 30: Логіка мартингейлу
+            if win:
+                # Будь-який WIN завершує серію
+                state[f"{o['pair']}_done_sig"] = o.get("sig", "")
+                if o.get("level") == 3: # Якщо WIN на POC - пауза
+                    state[f"{o['pair']}_abandon_until"] = time.time() + ABANDON_MIN * 60
+            elif o.get("level") == 3:
+                # LOSS на POC пробиває подушку - завершуємо серію і пауза
+                state[f"{o['pair']}_done_sig"] = o.get("sig", "")
+                state[f"{o['pair']}_abandon_until"] = time.time() + ABANDON_MIN * 60
+                
         except Exception:
             o["retries"] = o.get("retries", 0) + 1
             if o["retries"] < 5:
