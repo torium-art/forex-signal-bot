@@ -95,3 +95,5 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-19 15:54,AUDCHF,BUY,2,0.57595,0.57614,0.57613,15,38.3,2.8,0.216,structure24,True,sent,0.0,0.971,weak,12,0,False
 2026-10-19 15:57,GBPCAD,SELL,1,1.87806,1.8784,1.87825,5,30.9,2.57,0.289,structure24,True,sent,0.0,1.46,weak,12,0,False
 2026-10-19 16:42,GBPAUD,SELL,1,1.90796,1.90838,1.90802,5,46.8,6.46,0.208,structure24,True,sent,0.0,1.004,medium,13,0,False
+2026-10-19 17:24,AUDUSD,BUY,1,0.69902,0.69918,0.69911,5,36.7,4.62,0.232,structure24,True,sent,0.0,1.161,weak,14,0,False
+2026-10-19 17:35,AUDCHF,BUY,1,0.5766,0.5768,0.57673,5,31.8,1.17,0.308,structure24,True,sent,0.0,1.051,weak,14,0,False
