@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v27
+Forex Price-Action Signal Bot — v28
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -8,7 +8,12 @@ FIX 26: ATR-залежна ширина зони
 FIX 27: мінімум 3 зони в ladder
 FIX 28: примусове розбиття широких зон
 FIX 29: фіксація драбини в state
-FIX 30: швидкий кулдаун (3 хв) та логіка мартингейлу (done_sig після WIN/POC)
+FIX 30: швидкий кулдаун (3 хв) та логіка мартингейлу
+FIX 31: анти-спам — стабільний ключ драбини, захист рівнів (2 год),
+        пауза 35 хв після будь-якого WIN, ліміт L1 за годину
+FIX 32: інформативний формат Telegram (клас сигналу, сила зони,
+        тренд M30 + локальний тренд M5, блок "що це значить")
+FIX 33: журнал пише тільки реальні відправлення
 """
 import csv
 import json
@@ -70,16 +75,21 @@ MIN_LADDER_ZONES = 3
 DWELL_LOOKBACK = 12
 DWELL_MAX_CLOSES = 6
 
-SIGNAL_COOLDOWN_MIN = 3  # FIX 30: Швидкий кулдаун для мартингейлу
+SIGNAL_COOLDOWN_MIN = 3  # FIX 30: швидкий кулдаун для мартингейлу
 BREAKOUT_RANGE_MULT = 1.8
 BREAKOUT_LOOKBACK = 20
+
+# FIX 31: анти-спам
+WIN_PAUSE_MIN = 35       # пауза по парі після будь-якого WIN
+LEVEL_REPEAT_MIN = 120   # той самий рівень не частіше ніж раз на 2 години
+MAX_L1_PER_HOUR = 4      # максимум нових L1 за годину по всіх парах
 
 # Логіка експірації
 LEVEL_EXPIRY_BASE_MIN = 5   # Рівень 1
 LEVEL_EXPIRY_MID_MIN = 15   # Рівень 2
 LEVEL_EXPIRY_POC_MIN = 15   # POC
 
-ABANDON_MIN = 30 # FIX 30: Пауза після POC (було 60, зробили 30 за твоїм запитом)
+ABANDON_MIN = 30  # пауза після втрати на POC
 
 DAILY_REPORT_HOUR = 19
 DAILY_REPORT_MINUTE = 55
@@ -135,8 +145,10 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    with open(STATE_FILE, "w") as f:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(state, f)
+    os.replace(tmp, STATE_FILE)
 
 
 def fetch_candles(pair: str, interval: str, period: str) -> pd.DataFrame:
@@ -382,7 +394,7 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
         expiry = LEVEL_EXPIRY_BASE_MIN
     else:
         expiry = LEVEL_EXPIRY_MID_MIN
-        
+
     return {"level": idx, "lo": z["lo"], "hi": z["hi"],
             "center": (z["lo"] + z["hi"]) / 2, "strength": z["share"],
             "above": z["above"], "below": z["below"], "is_poc": is_poc,
@@ -502,12 +514,36 @@ def mark_signal_sent(state: dict, pair: str) -> None:
     state[f"{pair}_last_signal_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
 
 
+def l1_recent_count(state: dict) -> int:
+    """FIX 31: скільки нових L1 відправлено за останню годину."""
+    now = datetime.now(TZ)
+    cnt = 0
+    for k, v in state.items():
+        if k.endswith("_level1_sent_at") and isinstance(v, str):
+            try:
+                dt = datetime.strptime(v, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+                if (now - dt).total_seconds() < 3600:
+                    cnt += 1
+            except Exception:
+                pass
+    return cnt
+
+
 def send_telegram_message(html_text: str) -> bool:
     if not in_trading_window():
+        print("[Telegram] пропущено — поза торговим вікном")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": html_text, "parse_mode": "HTML"}, timeout=15)
-    return resp.status_code == 200
+    try:
+        resp = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": html_text,
+                                        "parse_mode": "HTML"}, timeout=15)
+    except Exception as e:
+        print(f"[Telegram error] {e}")
+        return False
+    if resp.status_code != 200:
+        print(f"[Telegram error] {resp.status_code}: {resp.text}")
+        return False
+    return True
 
 
 def start_trajectory(state: dict, cand: dict, meta: dict) -> None:
@@ -599,49 +635,130 @@ def send_daily_report(state: dict) -> None:
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     if state.get("last_daily_report") == today: return
-    
+
     today_signals = []
     if os.path.exists(JOURNAL_FILE):
         with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
             today_signals = [r for r in csv.DictReader(f) if r.get("ts", "").startswith(today)]
-            
+
     today_outcomes = []
     if os.path.exists(OUTCOMES_FILE):
         with open(OUTCOMES_FILE, "r", encoding="utf-8") as f:
             today_outcomes = [r for r in csv.DictReader(f) if r.get("ts", "").startswith(today)]
-            
+
     wins = sum(1 for o in today_outcomes if o.get("result") == "WIN")
     losses = sum(1 for o in today_outcomes if o.get("result") == "LOSS")
-    
+
     msg = f"📊 <b>Підсумок дня: {today}</b>\n📍 Сигналів: {len(today_signals)}\n✅ WIN: {wins} | ❌ LOSS: {losses}\n"
     if wins+losses > 0: msg += f"📈 Winrate: <b>{wins/(wins+losses)*100:.1f}%</b>\n"
     if send_telegram_message(msg): state["last_daily_report"] = today
 
 
-def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bool, source: str, score: float, er: float) -> str:
+# ============================================================
+# FIX 32: ІНФОРМАТИВНИЙ ФОРМАТ ПОВІДОМЛЕННЯ
+# ============================================================
+def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bool,
+                  source: str, score: float, er: float,
+                  er5: float = 0.0, loc_dir: str = "") -> str:
     clean_pair = pair.replace("=X", "")
-    direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
-    
-    # Чітке відображення рівня для мартингейлу
-    if level["level"] == 1:
-        level_label = "1️⃣ Рівень 1 (Базовий вхід)"
-    elif level["level"] == 2:
-        level_label = "2️⃣ Рівень 2 (Перекриття х2)"
+
+    # Клас сигналу по score — видно з першого рядка
+    if score >= 80:
+        head_emoji, quality = "🟢", "СИЛЬНИЙ"
+    elif score >= 50:
+        head_emoji, quality = "🟡", "СЕРЕДНІЙ"
     else:
-        level_label = "3️⃣ Рівень 3 / POC (Фінальне перекриття)"
-        
+        head_emoji, quality = "🟠", "СЛАБКИЙ"
+
+    direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
+
+    if level["level"] == 1:
+        level_label = "1️⃣ Рівень 1 — перший ретест після пробою"
+    elif level["level"] == 2:
+        level_label = "2️⃣ Рівень 2 — перекриття х2 (якщо L1 був LOSS)"
+    else:
+        level_label = "3️⃣ Рівень 3 / POC — фінальне перекриття"
+
+    side = "підтримка" if trend == "BUY" else "опір"
+
     s = float(level["strength"])
-    return (
-        f"<b>🚨 СИГНАЛ: {clean_pair}</b>\n"
-        f"{direction}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📍 <b>{level_label}</b>\n"
-        f"💰 Зона: <code>{level['lo']:.5f} - {level['hi']:.5f}</code>\n"
-        f"💵 Вхід: <code>{price:.5f}</code>\n"
-        f"⏱ Експірація: {level['expiry_min']} хв\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Score: {score:.0f} | Strength: {s*100:.1f}%"
-    )
+    if s >= 0.15: s_word = "сильна"
+    elif s >= 0.10: s_word = "середня"
+    elif s >= 0.05: s_word = "слабка"
+    else: s_word = "дуже слабка"
+
+    if er >= 0.45: er_word = "дуже сильний"
+    elif er >= 0.30: er_word = "сильний"
+    elif er >= 0.22: er_word = "помірний"
+    else: er_word = "слабкий"
+
+    if er5 >= 0.30: er5_word = "сильний"
+    elif er5 >= 0.15: er5_word = "помірний"
+    else: er5_word = "слабкий"
+
+    src_word = {"structure24": "свіжий (24 св. M30)",
+                "structure48": "старіший (48 св. M30)",
+                "ema200": "глобальний (EMA200)"}.get(source, source)
+
+    # Локальний тренд M5: чи збігається з сигналом
+    loc_line = ""
+    agree = (loc_dir == "up" and trend == "BUY") or (loc_dir == "down" and trend == "SELL")
+    if loc_dir:
+        if agree:
+            tail = "✅ за сигналом"
+        elif loc_dir == "flat":
+            tail = "➖ флет"
+        else:
+            tail = "⚠️ проти сигналу"
+        loc_line = f"• Тренд M5 (локальний): {er5:.2f} ({er5_word}) · {tail}"
+
+    # Блок висновків
+    notes = []
+    if s < 0.05:
+        notes.append("зона дуже слабка по об'єму — краще пропустити або чекати наступний рівень")
+    elif s < 0.10:
+        notes.append("зона слабка по об'єму — не перекривай ставку")
+    if er < 0.20:
+        notes.append("тренд M30 слабкий — обережно")
+    elif er >= 0.30:
+        notes.append("тренд M30 прямий і сильний — це плюс")
+    if loc_dir and loc_dir != "flat" and not agree:
+        notes.append("локальний тренд M5 проти сигналу — вхід ризикованіший")
+    if breakout:
+        notes.append("імпульсна свічка зараз — входь тільки в зоні, не женись за ціною")
+    if level["level"] == 2:
+        notes.append("входь тільки якщо L1 був LOSS (перекриття х2)")
+    elif level["level"] == 1:
+        notes.append("перший ретест — найменший ризик")
+    elif level["is_poc"]:
+        notes.append("це POC — останній вхід перед можливим зломом тренду")
+    notes = notes[:4]
+    notes_block = "\n".join(f"• {n}" for n in notes) if notes else "• особливих зауважень немає"
+
+    lines = [
+        f"{head_emoji} <b>СИГНАЛ: {clean_pair} — {quality}</b>",
+        f"Напрямок: {direction}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📍 <b>{level_label}</b>",
+        f"💰 Зона {side}: <code>{level['lo']:.5f} – {level['hi']:.5f}</code>",
+        f"💵 Вхід: <code>{price:.5f}</code>",
+        f"⏱ Експірація: {level['expiry_min']} хв",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>ЯКІСТЬ СИГНАЛУ</b>",
+        f"• Score: {score:.0f} (умовний макс ~150)",
+        f"• Сила зони: {s*100:.1f}% ({s_word})",
+        f"• Тренд M30: {er:.2f} ({er_word}) · {src_word}",
+    ]
+    if loc_line:
+        lines.append(loc_line)
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 <b>ЩО ЦЕ ЗНАЧИТЬ</b>",
+        notes_block,
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"⏰ {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)",
+    ]
+    return "\n".join(lines)
 
 
 def journal_write(row: dict) -> None:
@@ -676,7 +793,7 @@ def fetch_high_impact_events():
             if age < NEWS_CACHE_TTL_HOURS:
                 return [{"title": e["title"], "currency": e["country"], "time": datetime.fromisoformat(e["date"].replace("Z", "+00:00")).astimezone(TZ)} for e in cache["data"] if e.get("impact") == "High" and e.get("country") in WATCHED_CURRENCIES]
         except Exception: pass
-    
+
     try:
         resp = requests.get(NEWS_CALENDAR_URL, timeout=15)
         if resp.status_code == 200:
@@ -705,20 +822,22 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
     low, high, window = find_last_impulse(df5)
     impulse_range = high - low
     if impulse_range <= 0: return None
-    
+
     current_price = float(df5["Close"].iloc[-1])
     pullback_depth = (high - current_price) / impulse_range if trend == "BUY" else (current_price - low) / impulse_range
     if pullback_depth < MIN_PULLBACK_FRACTION: return None
 
     if state.get(f"{pair}_abandon_until", 0) > time.time(): return None
 
-    # FIX 29: Persistent Ladder
-    sig = f"{low:.5f}|{high:.5f}"
+    # FIX 31: стабільний ключ драбини — округлення до 0.1 піпса,
+    # щоб мікрозсуви вікна не створювали "нову" драбину
+    digits = 3 if "JPY" in pair else 4
+    sig = f"{low:.{digits}f}|{high:.{digits}f}"
     if state.get(f"{pair}_done_sig") == sig: return None
-    
+
     ladder_key = f"{pair}_ladder_data"
     sig_key = f"{pair}_ladder_sig"
-    
+
     if state.get(sig_key) != sig:
         profile_window = df5.tail(PROFILE_LOOKBACK_5M)
         if profile_window.empty: return None
@@ -726,10 +845,12 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         if not new_ladder: return None
         state[ladder_key] = new_ladder
         state[sig_key] = sig
-        prefix = f"{pair}_{trend}_level"
-        for k in [k for k in list(state.keys()) if k.startswith(prefix)]:
+        # FIX 31: чистимо позначки рівнів ТІЛЬКИ протилежного напрямку.
+        # Позначки свого напрямку живуть за таймстампом і гаснуть через LEVEL_REPEAT_MIN.
+        opposite = "SELL" if trend == "BUY" else "BUY"
+        for k in [k for k in list(state.keys()) if k.startswith(f"{pair}_{opposite}_level")]:
             state.pop(k, None)
-            
+
     ladder = state[ladder_key]
     poc_zone = next(l for l in ladder if l["is_poc"])
     if zone_broken(poc_zone, df5, trend):
@@ -743,25 +864,42 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
     breakout = is_impulsive_breakout(df5, trend)
     atr_ratio = compute_atr_ratio(df5, 14, 20)
     now_dt = datetime.now(TZ)
-    
+
+    # FIX 32: локальний тренд M5 для повідомлення
+    er5 = efficiency_ratio(df5["Close"], 24)
+    if len(df5) >= 25:
+        net5 = float(df5["Close"].iloc[-1] - df5["Close"].iloc[-25])
+        loc_dir = "up" if net5 > 0 else ("down" if net5 < 0 else "flat")
+    else:
+        loc_dir = ""
+
     for level in ladder:
         if zone_broken(level, df5, trend): continue
         if zone_is_dwelling(df5, level): continue
         if not in_zone(current_price, level, trend): continue
         if not approach_ok(df5, level, trend): continue
-        
-        signal_key = f"{pair}_{trend}_level{level['level']}"
-        if state.get(signal_key, False): continue
-        
+
+        # FIX 31: той самий рівень не частіше ніж раз на LEVEL_REPEAT_MIN
+        signal_key = f"{pair}_{trend}_level{level['level']}_sent_at"
+        sent_at = state.get(signal_key)
+        if sent_at:
+            try:
+                sent_dt = datetime.strptime(sent_at, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+                if (datetime.now(TZ) - sent_dt).total_seconds() / 60 < LEVEL_REPEAT_MIN:
+                    continue
+            except Exception:
+                continue
+
         width = max(level["hi"] - level["lo"], 1e-12)
         depth = (level["hi"] - current_price) / width if trend == "BUY" else (current_price - level["lo"]) / width
         score = round(300 * float(level["strength"]) + 20 * (1.0 - min(1.0, max(0.0, depth))) + (15 if level["is_poc"] else 0) + 25 * min(1.0, er / 0.5), 1)
-        
+
         if score < MIN_SCORE: continue
-        
-        return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3), 
+
+        return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
                 "level": level, "entry": current_price, "score": score, "breakout": breakout,
-                "signal_key": signal_key, "sig": sig, "atr_ratio": round(atr_ratio, 3),
+                "sig": sig, "atr_ratio": round(atr_ratio, 3),
+                "er5": round(er5, 3), "loc_dir": loc_dir,
                 "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
                 "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events)}
     return None
@@ -774,16 +912,30 @@ def run_cycle(state: dict) -> None:
         try:
             cand = evaluate_pair(pair, state, news_events)
             if cand: candidates.append(cand)
-        except Exception: pass
+        except Exception:
+            pass
         time.sleep(BETWEEN_PAIRS_SLEEP_SEC)
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     sent_count = 0
     for cand in candidates:
-        if sent_count >= MAX_SIGNALS_PER_RUN: break
+        if sent_count >= MAX_SIGNALS_PER_RUN:
+            break
         lvl = cand["level"]
-        if send_telegram_message(format_signal(cand["pair"], cand["trend"], cand["entry"], lvl, cand["breakout"], cand["source"], cand["score"], cand["er"])):
-            state[cand["signal_key"]] = True
+
+        # FIX 31: ліміт нових L1 за годину (каскади L2/POC не обмежуємо)
+        if lvl["level"] == 1 and l1_recent_count(state) >= MAX_L1_PER_HOUR:
+            print(f"[ліміт] {cand['pair']}: L1 пропущено — ліміт {MAX_L1_PER_HOUR}/год")
+            continue
+
+        msg = format_signal(cand["pair"], cand["trend"], cand["entry"], lvl,
+                            cand["breakout"], cand["source"], cand["score"],
+                            cand["er"], cand.get("er5", 0.0), cand.get("loc_dir", ""))
+        sent_ok = send_telegram_message(msg)
+
+        # FIX 33: журнал пише тільки те, що реально відбулось
+        if sent_ok:
+            state[f"{cand['pair']}_{cand['trend']}_level{lvl['level']}_sent_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
             mark_signal_sent(state, cand["pair"])
             if lvl["is_poc"]:
                 state[f"{cand['pair']}_done_sig"] = cand["sig"]
@@ -794,12 +946,16 @@ def run_cycle(state: dict) -> None:
                 "level": lvl["level"], "sig": cand["sig"]})
             start_trajectory(state, cand, cand)
             sent_count += 1
+            reason, sent_flag = "sent", True
+        else:
+            reason, sent_flag = "помилка надсилання", False
+
         journal_write({
             "ts": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), "pair": cand["pair"].replace("=X", ""),
             "direction": cand["trend"], "level": lvl["level"], "zone_lo": float(round(lvl["lo"], 5)),
             "zone_hi": float(round(lvl["hi"], 5)), "entry_price": float(round(cand["entry"], 5)),
             "expiry_min": lvl["expiry_min"], "score": float(cand["score"]), "strength_pct": float(round(float(lvl["strength"]) * 100, 2)),
-            "er": float(cand["er"]), "trend_source": cand["source"], "sent": True, "reason": "sent",
+            "er": float(cand["er"]), "trend_source": cand["source"], "sent": sent_flag, "reason": reason,
             "atr_value": 0.0, "atr_ratio": float(cand.get("atr_ratio", 1.0)),
             "strength_bucket": classify_strength(float(lvl["strength"])), "hour_utc": cand.get("hour_utc", 0),
             "day_of_week": cand.get("day_of_week", 0), "is_cpi_day": cand.get("is_cpi_day", False)})
@@ -823,18 +979,17 @@ def process_outcomes(state: dict) -> None:
                            "exit_price": float(round(exit_price, 5)), "result": "WIN" if win else "LOSS",
                            "strength_pct": o.get("strength_pct", ""), "atr_ratio": o.get("atr_ratio", "")})
             print(f"[результат] {o['pair']} {o['dir']} L{o.get('level')}: {'WIN' if win else 'LOSS'}")
-            
-            # FIX 30: Логіка мартингейлу
+
             if win:
-                # Будь-який WIN завершує серію
+                # FIX 31: будь-який WIN закриває серію І ставить паузу по парі
                 state[f"{o['pair']}_done_sig"] = o.get("sig", "")
-                if o.get("level") == 3: # Якщо WIN на POC - пауза
-                    state[f"{o['pair']}_abandon_until"] = time.time() + ABANDON_MIN * 60
+                state[f"{o['pair']}_abandon_until"] = time.time() + WIN_PAUSE_MIN * 60
             elif o.get("level") == 3:
-                # LOSS на POC пробиває подушку - завершуємо серію і пауза
+                # LOSS на POC — серія завершена, пауза
                 state[f"{o['pair']}_done_sig"] = o.get("sig", "")
                 state[f"{o['pair']}_abandon_until"] = time.time() + ABANDON_MIN * 60
-                
+            # LOSS на L1/L2 — нічого не ставимо: серія чекає наступного рівня
+
         except Exception:
             o["retries"] = o.get("retries", 0) + 1
             if o["retries"] < 5:
