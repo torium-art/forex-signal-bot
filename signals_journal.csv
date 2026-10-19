@@ -85,3 +85,8 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-19 12:22,EURCAD,SELL,1,1.58001,1.58049,1.58006,5,46.8,3.0,0.398,structure24,True,sent,0.0,0.787,weak,9,0,False
 2026-10-19 13:07,EURGBP,SELL,1,0.8411,0.84139,0.84119,5,42.3,6.31,0.188,structure24,True,sent,0.0,0.852,medium,10,0,False
 2026-10-19 13:08,GBPCAD,SELL,1,1.8775,1.87787,1.87767,5,35.2,2.38,0.345,structure24,True,sent,0.0,0.94,weak,10,0,False
+2026-10-19 14:31,EURAUD,SELL,1,1.6062,1.60717,1.60628,5,65.4,11.17,0.272,structure24,True,sent,0.0,1.014,medium,11,0,False
+2026-10-19 14:31,GBPAUD,SELL,1,1.90846,1.90929,1.90851,5,61.2,11.12,0.181,structure24,True,sent,0.0,1.003,medium,11,0,False
+2026-10-19 14:35,USDCAD,SELL,1,1.40782,1.40843,1.40787,5,44.5,3.92,0.289,structure24,True,sent,0.0,1.03,weak,11,0,False
+2026-10-19 14:35,CADCHF,BUY,1,0.58554,0.58569,0.58568,5,41.1,1.32,0.378,structure24,True,sent,0.0,1.027,weak,11,0,False
+2026-10-19 14:40,CADCHF,BUY,2,0.58427,0.58538,0.58519,15,98.4,20.52,0.405,structure24,True,sent,0.0,1.032,strong,11,0,False
