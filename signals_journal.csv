@@ -98,3 +98,5 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-19 17:24,AUDUSD,BUY,1,0.69902,0.69918,0.69911,5,36.7,4.62,0.232,structure24,True,sent,0.0,1.161,weak,14,0,False
 2026-10-19 17:35,AUDCHF,BUY,1,0.5766,0.5768,0.57673,5,31.8,1.17,0.308,structure24,True,sent,0.0,1.051,weak,14,0,False
 2026-10-19 18:05,AUDJPY,BUY,1,110.5838,110.6185,110.617,5,45.6,3.25,0.335,structure24,True,sent,0.0,1.069,weak,15,0,False
+2026-10-19 18:21,CADJPY,BUY,1,112.4012,112.42814,112.416,5,42.8,3.21,0.443,structure24,True,sent,0.0,0.909,weak,15,0,False
+2026-10-19 18:21,AUDCHF,BUY,2,0.5764,0.5766,0.57652,15,34.4,2.62,0.294,structure24,True,sent,0.0,0.939,weak,15,0,False
