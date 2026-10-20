@@ -109,3 +109,5 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-20 15:47,USDCAD,SELL,1,1.40444,1.40497,1.40457,5,47.3,6.26,0.267,structure24,True,sent,0.0,1.169,medium,12,1,False
 2026-10-20 16:40,AUDCAD,SELL,2,0.98186,0.98222,0.98204,15,38.2,6.13,0.195,structure24,True,sent,0.0,0.946,medium,13,1,False
 2026-10-20 16:45,AUDCAD,SELL,1,0.98151,0.98186,0.9816,5,41.7,5.43,0.21,structure24,True,sent,0.0,0.954,medium,13,1,False
+2026-10-20 17:16,USDJPY,SELL,1,157.99041,158.04154,158.009,5,33.9,4.02,0.183,structure24,True,sent,0.0,0.949,weak,14,1,False
+2026-10-20 17:18,GBPAUD,BUY,1,1.9119,1.91223,1.91215,5,30.7,1.34,0.226,structure24,True,sent,0.0,0.986,weak,14,1,False
