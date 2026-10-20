@@ -107,3 +107,5 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-20 11:58,AUDUSD,BUY,1,0.69964,0.69982,0.69979,5,39.0,4.7,0.166,structure24,True,sent,0.0,0.942,weak,8,1,False
 2026-10-20 12:59,USDCAD,SELL,1,1.40575,1.40638,1.40577,5,48.4,6.58,0.188,structure24,True,sent,0.0,1.012,medium,9,1,False
 2026-10-20 15:47,USDCAD,SELL,1,1.40444,1.40497,1.40457,5,47.3,6.26,0.267,structure24,True,sent,0.0,1.169,medium,12,1,False
+2026-10-20 16:40,AUDCAD,SELL,2,0.98186,0.98222,0.98204,15,38.2,6.13,0.195,structure24,True,sent,0.0,0.946,medium,13,1,False
+2026-10-20 16:45,AUDCAD,SELL,1,0.98151,0.98186,0.9816,5,41.7,5.43,0.21,structure24,True,sent,0.0,0.954,medium,13,1,False
