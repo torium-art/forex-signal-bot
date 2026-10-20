@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v28
+Forex Price-Action Signal Bot — v28.1
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -14,6 +14,7 @@ FIX 31: анти-спам — стабільний ключ драбини, за
 FIX 32: інформативний формат Telegram (клас сигналу, сила зони,
         тренд M30 + локальний тренд M5, блок "що це значить")
 FIX 33: журнал пише тільки реальні відправлення
+FIX 34: рядок "Відкат M5" показує стан відкату, а не "проти сигналу"
 """
 import csv
 import json
@@ -655,7 +656,7 @@ def send_daily_report(state: dict) -> None:
 
 
 # ============================================================
-# FIX 32: ІНФОРМАТИВНИЙ ФОРМАТ ПОВІДОМЛЕННЯ
+# FIX 32 + FIX 34: ІНФОРМАТИВНИЙ ФОРМАТ ПОВІДОМЛЕННЯ
 # ============================================================
 def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bool,
                   source: str, score: float, er: float,
@@ -700,17 +701,20 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
                 "structure48": "старіший (48 св. M30)",
                 "ema200": "глобальний (EMA200)"}.get(source, source)
 
-    # Локальний тренд M5: чи збігається з сигналом
+    # FIX 34: стан ВІДКАТУ M5, а не "проти сигналу"
     loc_line = ""
-    agree = (loc_dir == "up" and trend == "BUY") or (loc_dir == "down" and trend == "SELL")
     if loc_dir:
-        if agree:
-            tail = "✅ за сигналом"
-        elif loc_dir == "flat":
-            tail = "➖ флет"
+        pullback = (loc_dir == "up" and trend == "SELL") or (loc_dir == "down" and trend == "BUY")
+        with_sig = (loc_dir == "up" and trend == "BUY") or (loc_dir == "down" and trend == "SELL")
+        if pullback:
+            tail = ("⚠️ ще імпульсний — може пробити зону, чекай реакції"
+                    if er5 >= 0.30 else
+                    "✅ вигас біля зони — гарні умови для входу")
+        elif with_sig:
+            tail = "⚠️ ціна вже йде за сигналом — запізнення або пробій"
         else:
-            tail = "⚠️ проти сигналу"
-        loc_line = f"• Тренд M5 (локальний): {er5:.2f} ({er5_word}) · {tail}"
+            tail = "➖ флет"
+        loc_line = f"• Відкат M5: {er5:.2f} ({er5_word}) · {tail}"
 
     # Блок висновків
     notes = []
@@ -722,8 +726,8 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         notes.append("тренд M30 слабкий — обережно")
     elif er >= 0.30:
         notes.append("тренд M30 прямий і сильний — це плюс")
-    if loc_dir and loc_dir != "flat" and not agree:
-        notes.append("локальний тренд M5 проти сигналу — вхід ризикованіший")
+    if loc_dir and er5 >= 0.30 and ((loc_dir == "up" and trend == "SELL") or (loc_dir == "down" and trend == "BUY")):
+        notes.append("відкат на M5 ще імпульсний — зону може пробити, краще дочекатись реакції")
     if breakout:
         notes.append("імпульсна свічка зараз — входь тільки в зоні, не женись за ціною")
     if level["level"] == 2:
@@ -829,8 +833,7 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
 
     if state.get(f"{pair}_abandon_until", 0) > time.time(): return None
 
-    # FIX 31: стабільний ключ драбини — округлення до 0.1 піпса,
-    # щоб мікрозсуви вікна не створювали "нову" драбину
+    # FIX 31: стабільний ключ драбини — округлення до 0.1 піпса
     digits = 3 if "JPY" in pair else 4
     sig = f"{low:.{digits}f}|{high:.{digits}f}"
     if state.get(f"{pair}_done_sig") == sig: return None
@@ -845,8 +848,7 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         if not new_ladder: return None
         state[ladder_key] = new_ladder
         state[sig_key] = sig
-        # FIX 31: чистимо позначки рівнів ТІЛЬКИ протилежного напрямку.
-        # Позначки свого напрямку живуть за таймстампом і гаснуть через LEVEL_REPEAT_MIN.
+        # FIX 31: чистимо позначки рівнів ТІЛЬКИ протилежного напрямку
         opposite = "SELL" if trend == "BUY" else "BUY"
         for k in [k for k in list(state.keys()) if k.startswith(f"{pair}_{opposite}_level")]:
             state.pop(k, None)
