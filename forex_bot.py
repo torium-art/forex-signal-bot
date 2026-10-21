@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v28.1
+Forex Price-Action Signal Bot — v29
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -15,6 +15,11 @@ FIX 32: інформативний формат Telegram (клас сигнал�
         тренд M30 + локальний тренд M5, блок "що це значить")
 FIX 33: журнал пише тільки реальні відправлення
 FIX 34: рядок "Відкат M5" показує стан відкату, а не "проти сигналу"
+FIX 35: замок серії — поки по парі є невирішений результат,
+        жодних нових сигналів по цій парі
+FIX 36: крокова машина серії — сигнал тільки від зони поточного кроку
+        (1 -> 2 -> 3, ніколи навпаки); крок росте після LOSS або
+        після пробою зони ціною; WIN закриває серію
 """
 import csv
 import json
@@ -376,15 +381,14 @@ def build_volume_zones(cells, max_width):
             pieces = split_wide_segment(seg, vols, cells, max_width)
         else:
             pieces = [seg]
-        for piece in pieces:
-            lo_i, hi_i = piece[0], piece[-1]
-            zone_vol = sum(raw[k] for k in piece)
-            zones.append({"lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
-                          "touches": sum(cells[k]["touches"] for k in piece),
-                          "above": sum(cells[k]["above"] for k in piece),
-                          "below": sum(cells[k]["below"] for k in piece),
-                          "share": zone_vol / total})
-        i = j + 1
+    for piece in pieces:
+        lo_i, hi_i = piece[0], piece[-1]
+        zone_vol = sum(raw[k] for k in piece)
+        zones.append({"lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
+                      "touches": sum(cells[k]["touches"] for k in piece),
+                      "above": sum(cells[k]["above"] for k in piece),
+                      "below": sum(cells[k]["below"] for k in piece),
+                      "share": zone_vol / total})
     return zones
 
 
@@ -528,6 +532,14 @@ def l1_recent_count(state: dict) -> int:
             except Exception:
                 pass
     return cnt
+
+
+def series_has_pending(state: dict, pair: str) -> bool:
+    """FIX 35: чи є по парі невирішений результат (відкрита серія)."""
+    for o in state.get("pending_outcomes", []):
+        if o.get("pair") == pair:
+            return True
+    return False
 
 
 def send_telegram_message(html_text: str) -> bool:
@@ -676,7 +688,7 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
     if level["level"] == 1:
         level_label = "1️⃣ Рівень 1 — перший ретест після пробою"
     elif level["level"] == 2:
-        level_label = "2️⃣ Рівень 2 — перекриття х2 (якщо L1 був LOSS)"
+        level_label = "2️⃣ Рівень 2 — перекриття х2 (серія після мінуса)"
     else:
         level_label = "3️⃣ Рівень 3 / POC — фінальне перекриття"
 
@@ -731,7 +743,7 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
     if breakout:
         notes.append("імпульсна свічка зараз — входь тільки в зоні, не женись за ціною")
     if level["level"] == 2:
-        notes.append("входь тільки якщо L1 був LOSS (перекриття х2)")
+        notes.append("перекриття: входь х2 тільки якщо попередній рівень серії був у тебе мінусом")
     elif level["level"] == 1:
         notes.append("перший ретест — найменший ризик")
     elif level["is_poc"]:
@@ -815,6 +827,11 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         if ev["currency"] in (clean[:3], clean[3:6]) and -NEWS_AFTER_MIN <= (ev["time"] - datetime.now(TZ)).total_seconds() / 60 <= NEWS_BEFORE_MIN:
             return None
 
+    # FIX 35: ЗАМОК СЕРІЇ — поки по парі є невирішений результат,
+    # жодних нових сигналів. Аналіз повернеться тільки після закриття.
+    if series_has_pending(state, pair):
+        return None
+
     df30 = fetch_candles(pair, interval="30m", period="30d")
     if df30.empty: return None
     trend, source, er = analyze_trend_30m(df30)
@@ -863,6 +880,21 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
 
     if cooldown_active(state, pair): return None
 
+    # FIX 36: КРОКОВА МАШИНА СЕРІЇ
+    step = state.get(f"{pair}_series_step", 1)
+    if state.get(f"{pair}_series_sig") != sig:
+        # новий імпульс — нова серія з кроку 1
+        state[f"{pair}_series_sig"] = sig
+        state[f"{pair}_series_step"] = 1
+        step = 1
+    # якщо зону поточного кроку вже пробито ціною — крок іде вперед
+    # (твоя логіка: "пробило рівень 1 — чекаю рівень 2")
+    while step <= len(ladder) and zone_broken(ladder[step - 1], df5, trend):
+        step += 1
+    state[f"{pair}_series_step"] = step
+    if step > len(ladder):
+        return None
+
     breakout = is_impulsive_breakout(df5, trend)
     atr_ratio = compute_atr_ratio(df5, 14, 20)
     now_dt = datetime.now(TZ)
@@ -876,6 +908,8 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         loc_dir = ""
 
     for level in ladder:
+        # FIX 36: сигнал тільки від зони ПОТОЧНОГО кроку серії
+        if level["level"] != step: continue
         if zone_broken(level, df5, trend): continue
         if zone_is_dwelling(df5, level): continue
         if not in_zone(current_price, level, trend): continue
@@ -983,14 +1017,18 @@ def process_outcomes(state: dict) -> None:
             print(f"[результат] {o['pair']} {o['dir']} L{o.get('level')}: {'WIN' if win else 'LOSS'}")
 
             if win:
-                # FIX 31: будь-який WIN закриває серію І ставить паузу по парі
+                # FIX 31 + FIX 36: WIN закриває серію і ставить паузу по парі
                 state[f"{o['pair']}_done_sig"] = o.get("sig", "")
                 state[f"{o['pair']}_abandon_until"] = time.time() + WIN_PAUSE_MIN * 60
+                state[f"{o['pair']}_series_step"] = 1
             elif o.get("level") == 3:
                 # LOSS на POC — серія завершена, пауза
                 state[f"{o['pair']}_done_sig"] = o.get("sig", "")
                 state[f"{o['pair']}_abandon_until"] = time.time() + ABANDON_MIN * 60
-            # LOSS на L1/L2 — нічого не ставимо: серія чекає наступного рівня
+                state[f"{o['pair']}_series_step"] = 1
+            else:
+                # FIX 36: LOSS на L1/L2 — серія переходить на наступний крок
+                state[f"{o['pair']}_series_step"] = int(o.get("level", 1)) + 1
 
         except Exception:
             o["retries"] = o.get("retries", 0) + 1
