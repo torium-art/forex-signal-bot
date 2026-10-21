@@ -116,3 +116,4 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-20 18:02,USDJPY,SELL,2,158.0037,158.0559,158.006,15,42.6,5.15,0.16,structure24,True,sent,0.0,1.07,medium,15,1,False
 2026-10-20 18:24,GBPUSD,BUY,2,1.33741,1.33776,1.33772,15,35.0,1.58,0.245,structure24,True,sent,0.0,1.231,weak,15,1,False
 2026-10-20 18:46,AUDUSD,BUY,1,0.70009,0.70024,0.70023,5,31.5,1.62,0.15,structure24,True,sent,0.0,0.99,weak,15,1,False
+2026-10-21 10:30,EURGBP,SELL,1,0.8391,0.83922,0.83914,5,40.7,4.33,0.289,structure24,True,sent,0.0,0.731,weak,7,2,False
