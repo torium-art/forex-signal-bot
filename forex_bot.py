@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v29.1
+Forex Price-Action Signal Bot — v30
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -23,6 +23,10 @@ FIX 36: крокова машина серії — сигнал тільки в�
 FIX 37: повернені Telegram-попередження про важливі новини
 FIX 38: виправлена build_volume_zones — прибрано нескінченний цикл
 FIX 39: heartbeat-рядок у логах кожного циклу
+FIX 40: кінцевий автомат серій (State Machine) — чітка логіка
+        L1 -> L2 -> L3 з таймерами та заморозкою
+FIX 41: Л2 тільки реальний (зона між Л1 і Л3), штучні середини відкидаються
+FIX 42: фільтр MIN_POC_STRENGTH — драбина відкидається якщо POC < 10%
 """
 import csv
 import json
@@ -84,21 +88,29 @@ MIN_LADDER_ZONES = 3
 DWELL_LOOKBACK = 12
 DWELL_MAX_CLOSES = 6
 
-SIGNAL_COOLDOWN_MIN = 3  # FIX 30: швидкий кулдаун для мартингейлу
+SIGNAL_COOLDOWN_MIN = 3
 BREAKOUT_RANGE_MULT = 1.8
 BREAKOUT_LOOKBACK = 20
 
 # FIX 31: анти-спам
-WIN_PAUSE_MIN = 35       # пауза по парі після будь-якого WIN
-LEVEL_REPEAT_MIN = 120   # той самий рівень не частіше ніж раз на 2 години
-MAX_L1_PER_HOUR = 4      # максимум нових L1 за годину по всіх парах
+WIN_PAUSE_MIN = 35
+LEVEL_REPEAT_MIN = 120
+MAX_L1_PER_HOUR = 4
 
 # Логіка експірації
-LEVEL_EXPIRY_BASE_MIN = 5   # Рівень 1
-LEVEL_EXPIRY_MID_MIN = 15   # Рівень 2
-LEVEL_EXPIRY_POC_MIN = 15   # POC
+LEVEL_EXPIRY_BASE_MIN = 5
+LEVEL_EXPIRY_MID_MIN = 15
+LEVEL_EXPIRY_POC_MIN = 15
 
-ABANDON_MIN = 30  # пауза після втрати на POC
+ABANDON_MIN = 30
+
+# FIX 40: таймери серій
+L2_TIMEOUT_MIN = 15      # шанс для Л2 (15 хв)
+L3_WAIT_MIN = 35         # очікування Л3 (35 хв)
+FREEZE_MIN = 40          # замороження пари після серії
+
+# FIX 42: мінімальна сила POC
+MIN_POC_STRENGTH = 0.10  # 10%
 
 DAILY_REPORT_HOUR = 19
 DAILY_REPORT_MINUTE = 55
@@ -411,6 +423,7 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
 
 
 def build_entry_ladder(window_profile: pd.DataFrame, trend: str):
+    """FIX 40+41: будує драбину Л1-Л2-Л3, де Л2 — реальна зона між Л1 і Л3."""
     profile_low = window_profile["Low"].min()
     profile_high = window_profile["High"].max()
     atr = compute_atr(window_profile, 14)
@@ -421,11 +434,13 @@ def build_entry_ladder(window_profile: pd.DataFrame, trend: str):
     zones = [z for z in build_volume_zones(cells, max_width) if z["touches"] >= MIN_ZONE_TOUCHES]
     if not zones:
         return []
+    
     poc = max(zones, key=lambda z: z["share"])
     poc_c = (poc["lo"] + poc["hi"]) / 2
     others = [z for z in zones if z is not poc]
     current_price = float(window_profile["Close"].iloc[-1])
-
+    
+    # Л1 = найближча зона до ціни
     if trend == "BUY":
         if poc_c >= current_price:
             return []
@@ -436,17 +451,41 @@ def build_entry_ladder(window_profile: pd.DataFrame, trend: str):
             return []
         path = [z for z in others if current_price <= (z["lo"] + z["hi"]) / 2 <= poc_c]
         path.sort(key=lambda z: (z["lo"] + z["hi"]) / 2)
-
-    ladder = []
-    if path:
-        ladder.append(_mk_level(len(ladder) + 1, path[0], False))
-        two_sided = [z for z in path[1:] if z["above"] >= MIN_TWO_SIDED and z["below"] >= MIN_TWO_SIDED]
-        if two_sided:
-            ladder.append(_mk_level(len(ladder) + 1, two_sided[0], False))
-    ladder.append(_mk_level(len(ladder) + 1, poc, True))
-
-    if len(ladder) < MIN_LADDER_ZONES:
+    
+    if not path:
         return []
+    
+    l1 = path[0]
+    l1_c = (l1["lo"] + l1["hi"]) / 2
+    
+    # Л2 = будь-яка зона між Л1 і Л3
+    l2_candidates = []
+    for z in path[1:]:
+        z_c = (z["lo"] + z["hi"]) / 2
+        if trend == "BUY":
+            if l1_c > z_c > poc_c:
+                l2_candidates.append(z)
+        else:
+            if l1_c < z_c < poc_c:
+                l2_candidates.append(z)
+    
+    if not l2_candidates:
+        return []  # Немає Л2 — драбина неповна
+    
+    # Беремо найсильнішу зону між Л1 і Л3
+    l2 = max(l2_candidates, key=lambda z: z["share"])
+    
+    # FIX 42: перевірка сили POC
+    if poc["share"] < MIN_POC_STRENGTH:
+        return []  # POC слабкий — драбина відкидається
+    
+    # Будуємо драбину
+    ladder = [
+        _mk_level(1, l1, False),
+        _mk_level(2, l2, False),
+        _mk_level(3, poc, True)
+    ]
+    
     return ladder
 
 
@@ -524,7 +563,6 @@ def mark_signal_sent(state: dict, pair: str) -> None:
 
 
 def l1_recent_count(state: dict) -> int:
-    """FIX 31: скільки нових L1 відправлено за останню годину."""
     now = datetime.now(TZ)
     cnt = 0
     for k, v in state.items():
@@ -536,14 +574,6 @@ def l1_recent_count(state: dict) -> int:
             except Exception:
                 pass
     return cnt
-
-
-def series_has_pending(state: dict, pair: str) -> bool:
-    """FIX 35: чи є по парі невирішений результат (відкрита серія)."""
-    for o in state.get("pending_outcomes", []):
-        if o.get("pair") == pair:
-            return True
-    return False
 
 
 def send_telegram_message(html_text: str) -> bool:
@@ -564,12 +594,11 @@ def send_telegram_message(html_text: str) -> bool:
 
 
 def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
-    """FIX 37: попередження у Telegram про важливу новину по парі."""
     clean_pair = pair.replace("=X", "")
     key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
     if state.get(key):
         return
-    msg = (f"⚠️ <b>Скоро важлива новина: {clean_pair}</b>\n"
+    msg = (f"️ <b>Скоро важлива новина: {clean_pair}</b>\n"
            f"Подія: {event['title']} ({event['currency']})\n"
            f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
            f"Рекомендація: не торгувати ~{NEWS_BEFORE_MIN} хв до і "
@@ -647,10 +676,10 @@ def check_tracking_health(state: dict) -> None:
     if not os.path.exists(TRAJECTORY_FILE): return
     age_hours = (time.time() - os.path.getmtime(TRAJECTORY_FILE)) / 3600
     if age_hours > TRACKING_HEALTH_HOURS and (time.time() - state.get("last_health_alert", 0)) > 86400:
-        if send_telegram_message(f"⚠️ <b>Трекінг не пише {age_hours:.0f} год</b>"):
+        if send_telegram_message(f"️ <b>Трекінг не пише {age_hours:.0f} год</b>"):
             state["last_health_alert"] = time.time()
     if age_hours > TRACKING_EMERGENCY_HOURS and (time.time() - state.get("last_emergency_alert", 0)) > 86400:
-        if send_telegram_message(f"🚨 <b>ТРЕКІНГ МЕРТВИЙ >{TRACKING_EMERGENCY_HOURS} год</b>"):
+        if send_telegram_message(f" <b>ТРЕКІНГ МЕРТВИЙ >{TRACKING_EMERGENCY_HOURS} год</b>"):
             state["last_emergency_alert"] = time.time()
 
 
@@ -659,7 +688,7 @@ def send_weekly_tech_report(state: dict) -> None:
     if now.weekday() != WEEKLY_REPORT_DAY or now.hour != WEEKLY_REPORT_HOUR: return
     week_key = now.strftime("%Y-%W")
     if state.get("last_weekly_report") == week_key: return
-    msg = f"📊 <b>Тижневий технічний звіт</b>\n⏰ {now.strftime('%Y-%m-%d %H:%M')} (Kyiv)"
+    msg = f"📊 <b>Тижневий технічний звіт</b>\n {now.strftime('%Y-%m-%d %H:%M')} (Kyiv)"
     if send_telegram_message(msg): state["last_weekly_report"] = week_key
 
 
@@ -686,22 +715,19 @@ def send_daily_report(state: dict) -> None:
     if send_telegram_message(msg): state["last_daily_report"] = today
 
 
-# ============================================================
-# FIX 32 + FIX 34: ІНФОРМАТИВНИЙ ФОРМАТ ПОВІДОМЛЕННЯ
-# ============================================================
 def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bool,
                   source: str, score: float, er: float,
                   er5: float = 0.0, loc_dir: str = "") -> str:
     clean_pair = pair.replace("=X", "")
 
     if score >= 80:
-        head_emoji, quality = "🟢", "СИЛЬНИЙ"
+        head_emoji, quality = "", "СИЛЬНИЙ"
     elif score >= 50:
         head_emoji, quality = "🟡", "СЕРЕДНІЙ"
     else:
         head_emoji, quality = "🟠", "СЛАБКИЙ"
 
-    direction = "🟢 BUY (CALL)" if trend == "BUY" else "🔴 SELL (PUT)"
+    direction = "🟢 BUY (CALL)" if trend == "BUY" else " SELL (PUT)"
 
     if level["level"] == 1:
         level_label = "1️⃣ Рівень 1 — перший ретест після пробою"
@@ -785,7 +811,7 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         lines.append(loc_line)
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "💡 <b>ЩО ЦЕ ЗНАЧИТЬ</b>",
+        " <b>ЩО ЦЕ ЗНАЧИТЬ</b>",
         notes_block,
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"⏰ {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)",
@@ -838,16 +864,20 @@ def fetch_high_impact_events():
 
 
 def evaluate_pair(pair: str, state: dict, news_events: list):
-    # FIX 37: попередження у Telegram + блокування пари у вікні новини
+    """FIX 40: кінцевий автомат серій."""
+    # Перевірка новин
     for ev in news_events:
         clean = pair.replace("=X", "")
         if ev["currency"] in (clean[:3], clean[3:6]) and -NEWS_AFTER_MIN <= (ev["time"] - datetime.now(TZ)).total_seconds() / 60 <= NEWS_BEFORE_MIN:
             maybe_send_news_warning(pair, ev, state)
             return None
 
-    # FIX 35: ЗАМОК СЕРІЇ — поки по парі є невирішений результат,
-    # жодних нових сигналів. Аналіз повернеться тільки після закриття.
-    if series_has_pending(state, pair):
+    # Отримуємо стан серії
+    series_state = state.get(f"{pair}_series_state", "SCANNING")
+    frozen_until = state.get(f"{pair}_frozen_until", 0)
+    
+    # Якщо пара заморожена — пропускаємо
+    if time.time() < frozen_until:
         return None
 
     df30 = fetch_candles(pair, interval="30m", period="30d")
@@ -868,7 +898,7 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
 
     if state.get(f"{pair}_abandon_until", 0) > time.time(): return None
 
-    # FIX 31: стабільний ключ драбини — округлення до 0.1 піпса
+    # FIX 31: стабільний ключ драбини
     digits = 3 if "JPY" in pair else 4
     sig = f"{low:.{digits}f}|{high:.{digits}f}"
     if state.get(f"{pair}_done_sig") == sig: return None
@@ -888,26 +918,16 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
             state.pop(k, None)
 
     ladder = state[ladder_key]
-    poc_zone = next(l for l in ladder if l["is_poc"])
-    if zone_broken(poc_zone, df5, trend):
-        state[f"{pair}_abandon_until"] = time.time() + ABANDON_MIN * 60
-        state.pop(ladder_key, None)
-        state.pop(sig_key, None)
+    if len(ladder) < 3:
+        return None  # Неповна драбина
+
+    l1, l2, l3 = ladder[0], ladder[1], ladder[2]
+    
+    # FIX 42: перевірка сили POC
+    if l3["strength"] < MIN_POC_STRENGTH:
         return None
 
     if cooldown_active(state, pair): return None
-
-    # FIX 36: КРОКОВА МАШИНА СЕРІЇ
-    step = state.get(f"{pair}_series_step", 1)
-    if state.get(f"{pair}_series_sig") != sig:
-        state[f"{pair}_series_sig"] = sig
-        state[f"{pair}_series_step"] = 1
-        step = 1
-    while step <= len(ladder) and zone_broken(ladder[step - 1], df5, trend):
-        step += 1
-    state[f"{pair}_series_step"] = step
-    if step > len(ladder):
-        return None
 
     breakout = is_impulsive_breakout(df5, trend)
     atr_ratio = compute_atr_ratio(df5, 14, 20)
@@ -920,36 +940,109 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
     else:
         loc_dir = ""
 
-    for level in ladder:
-        # FIX 36: сигнал тільки від зони ПОТОЧНОГО кроку серії
-        if level["level"] != step: continue
-        if zone_broken(level, df5, trend): continue
-        if zone_is_dwelling(df5, level): continue
-        if not in_zone(current_price, level, trend): continue
-        if not approach_ok(df5, level, trend): continue
+    # FIX 40: логіка кінцевого автомата
+    if series_state == "SCANNING":
+        # Шукаємо вхід у Л1
+        if in_zone(current_price, l1, trend) and approach_ok(df5, l1, trend):
+            if not zone_is_dwelling(df5, l1):
+                return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
+                        "level": l1, "entry": current_price, "score": 0, "breakout": breakout,
+                        "sig": sig, "atr_ratio": round(atr_ratio, 3),
+                        "er5": round(er5, 3), "loc_dir": loc_dir,
+                        "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
+                        "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
+                        "next_state": "L1_ACTIVE"}
 
-        signal_key = f"{pair}_{trend}_level{level['level']}_sent_at"
-        sent_at = state.get(signal_key)
-        if sent_at:
-            try:
-                sent_dt = datetime.strptime(sent_at, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
-                if (datetime.now(TZ) - sent_dt).total_seconds() / 60 < LEVEL_REPEAT_MIN:
-                    continue
-            except Exception:
-                continue
+    elif series_state == "L1_ACTIVE":
+        # Перевіряємо результат Л1
+        pending = next((o for o in state.get("pending_outcomes", []) if o["pair"] == pair and o.get("level") == 1), None)
+        if pending:
+            # Ще не знаємо результат — чекаємо
+            # Але якщо ціна вже біля Л2 — даємо Л2 достроково
+            if in_zone(current_price, l2, trend):
+                return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
+                        "level": l2, "entry": current_price, "score": 0, "breakout": breakout,
+                        "sig": sig, "atr_ratio": round(atr_ratio, 3),
+                        "er5": round(er5, 3), "loc_dir": loc_dir,
+                        "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
+                        "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
+                        "next_state": "L2_ACTIVE"}
+        else:
+            # Результат вже оброблений в process_outcomes
+            pass
 
-        width = max(level["hi"] - level["lo"], 1e-12)
-        depth = (level["hi"] - current_price) / width if trend == "BUY" else (current_price - level["lo"]) / width
-        score = round(300 * float(level["strength"]) + 20 * (1.0 - min(1.0, max(0.0, depth))) + (15 if level["is_poc"] else 0) + 25 * min(1.0, er / 0.5), 1)
+    elif series_state == "L2_ACTIVE":
+        # Перевіряємо результат Л2
+        pending = next((o for o in state.get("pending_outcomes", []) if o["pair"] == pair and o.get("level") == 2), None)
+        if pending:
+            # Ще не знаємо результат — чекаємо
+            # Але якщо ціна вже біля Л3 — даємо Л3 достроково
+            if in_zone(current_price, l3, trend):
+                return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
+                        "level": l3, "entry": current_price, "score": 0, "breakout": breakout,
+                        "sig": sig, "atr_ratio": round(atr_ratio, 3),
+                        "er5": round(er5, 3), "loc_dir": loc_dir,
+                        "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
+                        "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
+                        "next_state": "L3_ACTIVE"}
+        else:
+            # Результат вже оброблений
+            pass
+        
+        # Перевірка таймеру Л2 (15 хв)
+        series_started = state.get(f"{pair}_series_started_at", 0)
+        time_since_l2 = time.time() - series_started
+        if time_since_l2 > L2_TIMEOUT_MIN * 60:
+            # Час вийшов, злам серії
+            state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
+            state[f"{pair}_series_state"] = "SCANNING"
+            print(f"[v30] {pair}: таймер Л2 вийшов, серія закрита")
+            return None
+        
+        # Перевірка зламу Л2
+        if zone_broken(l2, df5, trend):
+            state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
+            state[f"{pair}_series_state"] = "SCANNING"
+            print(f"[v30] {pair}: Л2 пробито, серія закрита")
+            return None
 
-        if score < MIN_SCORE: continue
+    elif series_state == "WAITING_L3":
+        # Чекаємо, поки ціна дійде до Л3
+        if in_zone(current_price, l3, trend):
+            return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
+                    "level": l3, "entry": current_price, "score": 0, "breakout": breakout,
+                    "sig": sig, "atr_ratio": round(atr_ratio, 3),
+                    "er5": round(er5, 3), "loc_dir": loc_dir,
+                    "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
+                    "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
+                    "next_state": "L3_ACTIVE"}
+        
+        # Перевірка таймеру Л3 (35 хв)
+        waiting_since = state.get(f"{pair}_waiting_l3_since", 0)
+        time_waiting = time.time() - waiting_since
+        if time_waiting > L3_WAIT_MIN * 60:
+            state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
+            state[f"{pair}_series_state"] = "SCANNING"
+            print(f"[v30] {pair}: таймер Л3 вийшов, серія закрита")
+            return None
+        
+        # Перевірка зламу Л2
+        if zone_broken(l2, df5, trend):
+            state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
+            state[f"{pair}_series_state"] = "SCANNING"
+            print(f"[v30] {pair}: Л2 пробито під час очікування Л3, серія закрита")
+            return None
 
-        return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
-                "level": level, "entry": current_price, "score": score, "breakout": breakout,
-                "sig": sig, "atr_ratio": round(atr_ratio, 3),
-                "er5": round(er5, 3), "loc_dir": loc_dir,
-                "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
-                "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events)}
+    elif series_state == "L3_ACTIVE":
+        # Перевіряємо результат Л3
+        pending = next((o for o in state.get("pending_outcomes", []) if o["pair"] == pair and o.get("level") == 3), None)
+        if pending:
+            # Ще не знаємо результат — чекаємо
+            pass
+        else:
+            # Результат вже оброблений
+            pass
+
     return None
 
 
@@ -983,6 +1076,15 @@ def run_cycle(state: dict) -> None:
         if sent_ok:
             state[f"{cand['pair']}_{cand['trend']}_level{lvl['level']}_sent_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
             mark_signal_sent(state, cand["pair"])
+            
+            # FIX 40: переходимо у новий стан
+            next_state = cand.get("next_state", "SCANNING")
+            state[f"{cand['pair']}_series_state"] = next_state
+            if next_state == "L2_ACTIVE":
+                state[f"{cand['pair']}_series_started_at"] = time.time()
+            elif next_state == "WAITING_L3":
+                state[f"{cand['pair']}_waiting_l3_since"] = time.time()
+            
             if lvl["is_poc"]:
                 state[f"{cand['pair']}_done_sig"] = cand["sig"]
             state.setdefault("pending_outcomes", []).append({
@@ -1008,6 +1110,7 @@ def run_cycle(state: dict) -> None:
 
 
 def process_outcomes(state: dict) -> None:
+    """FIX 40: обробка результатів з оновленням станів серій."""
     pending = state.get("pending_outcomes", [])
     if not pending: return
     now_ts = time.time()
@@ -1026,16 +1129,27 @@ def process_outcomes(state: dict) -> None:
                            "strength_pct": o.get("strength_pct", ""), "atr_ratio": o.get("atr_ratio", "")})
             print(f"[результат] {o['pair']} {o['dir']} L{o.get('level')}: {'WIN' if win else 'LOSS'}")
 
+            # FIX 40: оновлення стану серії
+            pair = o["pair"]
             if win:
-                state[f"{o['pair']}_done_sig"] = o.get("sig", "")
-                state[f"{o['pair']}_abandon_until"] = time.time() + WIN_PAUSE_MIN * 60
-                state[f"{o['pair']}_series_step"] = 1
-            elif o.get("level") == 3:
-                state[f"{o['pair']}_done_sig"] = o.get("sig", "")
-                state[f"{o['pair']}_abandon_until"] = time.time() + ABANDON_MIN * 60
-                state[f"{o['pair']}_series_step"] = 1
+                # WIN — заморожуємо пару
+                state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
+                state[f"{pair}_series_state"] = "SCANNING"
+                state[f"{pair}_done_sig"] = o.get("sig", "")
             else:
-                state[f"{o['pair']}_series_step"] = int(o.get("level", 1)) + 1
+                # LOSS — переходимо до наступного рівня
+                level = o.get("level", 1)
+                if level == 1:
+                    state[f"{pair}_series_state"] = "L2_ACTIVE"
+                    state[f"{pair}_series_started_at"] = time.time()
+                elif level == 2:
+                    state[f"{pair}_series_state"] = "WAITING_L3"
+                    state[f"{pair}_waiting_l3_since"] = time.time()
+                elif level == 3:
+                    # LOSS на POC — серія закрита
+                    state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
+                    state[f"{pair}_series_state"] = "SCANNING"
+                    state[f"{pair}_done_sig"] = o.get("sig", "")
 
         except Exception:
             o["retries"] = o.get("retries", 0) + 1
@@ -1055,7 +1169,6 @@ def main_loop() -> None:
             process_outcomes(state)
             process_trajectory(state)
             run_cycle(state)
-            # FIX 39: heartbeat — видно, що бот живий і цикл завершився
             print(f"[цикл] {datetime.now(TZ).strftime('%H:%M')} OK | відкритих серій: {len(state.get('pending_outcomes', []))}")
             if datetime.now(TZ).hour == DAILY_REPORT_HOUR and datetime.now(TZ).minute >= DAILY_REPORT_MINUTE:
                 send_daily_report(state)
