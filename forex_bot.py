@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v29
+Forex Price-Action Signal Bot — v29.1
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -20,6 +20,9 @@ FIX 35: замок серії — поки по парі є невирішени
 FIX 36: крокова машина серії — сигнал тільки від зони поточного кроку
         (1 -> 2 -> 3, ніколи навпаки); крок росте після LOSS або
         після пробою зони ціною; WIN закриває серію
+FIX 37: повернені Telegram-попередження про важливі новини
+FIX 38: виправлена build_volume_zones — прибрано нескінченний цикл
+FIX 39: heartbeat-рядок у логах кожного циклу
 """
 import csv
 import json
@@ -381,14 +384,15 @@ def build_volume_zones(cells, max_width):
             pieces = split_wide_segment(seg, vols, cells, max_width)
         else:
             pieces = [seg]
-    for piece in pieces:
-        lo_i, hi_i = piece[0], piece[-1]
-        zone_vol = sum(raw[k] for k in piece)
-        zones.append({"lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
-                      "touches": sum(cells[k]["touches"] for k in piece),
-                      "above": sum(cells[k]["above"] for k in piece),
-                      "below": sum(cells[k]["below"] for k in piece),
-                      "share": zone_vol / total})
+        for piece in pieces:
+            lo_i, hi_i = piece[0], piece[-1]
+            zone_vol = sum(raw[k] for k in piece)
+            zones.append({"lo": cells[lo_i]["lo"], "hi": cells[hi_i]["hi"],
+                          "touches": sum(cells[k]["touches"] for k in piece),
+                          "above": sum(cells[k]["above"] for k in piece),
+                          "below": sum(cells[k]["below"] for k in piece),
+                          "share": zone_vol / total})
+        i = j + 1
     return zones
 
 
@@ -559,6 +563,21 @@ def send_telegram_message(html_text: str) -> bool:
     return True
 
 
+def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
+    """FIX 37: попередження у Telegram про важливу новину по парі."""
+    clean_pair = pair.replace("=X", "")
+    key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
+    if state.get(key):
+        return
+    msg = (f"⚠️ <b>Скоро важлива новина: {clean_pair}</b>\n"
+           f"Подія: {event['title']} ({event['currency']})\n"
+           f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
+           f"Рекомендація: не торгувати ~{NEWS_BEFORE_MIN} хв до і "
+           f"~{NEWS_AFTER_MIN} хв після.")
+    if send_telegram_message(msg):
+        state[key] = True
+
+
 def start_trajectory(state: dict, cand: dict, meta: dict) -> None:
     now_ts = time.time()
     checks = [{"min": m, "due_ts": now_ts + m * 60, "price": None} for m in TRAJECTORY_POINTS]
@@ -675,7 +694,6 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
                   er5: float = 0.0, loc_dir: str = "") -> str:
     clean_pair = pair.replace("=X", "")
 
-    # Клас сигналу по score — видно з першого рядка
     if score >= 80:
         head_emoji, quality = "🟢", "СИЛЬНИЙ"
     elif score >= 50:
@@ -713,7 +731,6 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
                 "structure48": "старіший (48 св. M30)",
                 "ema200": "глобальний (EMA200)"}.get(source, source)
 
-    # FIX 34: стан ВІДКАТУ M5, а не "проти сигналу"
     loc_line = ""
     if loc_dir:
         pullback = (loc_dir == "up" and trend == "SELL") or (loc_dir == "down" and trend == "BUY")
@@ -728,7 +745,6 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
             tail = "➖ флет"
         loc_line = f"• Відкат M5: {er5:.2f} ({er5_word}) · {tail}"
 
-    # Блок висновків
     notes = []
     if s < 0.05:
         notes.append("зона дуже слабка по об'єму — краще пропустити або чекати наступний рівень")
@@ -822,9 +838,11 @@ def fetch_high_impact_events():
 
 
 def evaluate_pair(pair: str, state: dict, news_events: list):
+    # FIX 37: попередження у Telegram + блокування пари у вікні новини
     for ev in news_events:
         clean = pair.replace("=X", "")
         if ev["currency"] in (clean[:3], clean[3:6]) and -NEWS_AFTER_MIN <= (ev["time"] - datetime.now(TZ)).total_seconds() / 60 <= NEWS_BEFORE_MIN:
+            maybe_send_news_warning(pair, ev, state)
             return None
 
     # FIX 35: ЗАМОК СЕРІЇ — поки по парі є невирішений результат,
@@ -865,7 +883,6 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         if not new_ladder: return None
         state[ladder_key] = new_ladder
         state[sig_key] = sig
-        # FIX 31: чистимо позначки рівнів ТІЛЬКИ протилежного напрямку
         opposite = "SELL" if trend == "BUY" else "BUY"
         for k in [k for k in list(state.keys()) if k.startswith(f"{pair}_{opposite}_level")]:
             state.pop(k, None)
@@ -883,12 +900,9 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
     # FIX 36: КРОКОВА МАШИНА СЕРІЇ
     step = state.get(f"{pair}_series_step", 1)
     if state.get(f"{pair}_series_sig") != sig:
-        # новий імпульс — нова серія з кроку 1
         state[f"{pair}_series_sig"] = sig
         state[f"{pair}_series_step"] = 1
         step = 1
-    # якщо зону поточного кроку вже пробито ціною — крок іде вперед
-    # (твоя логіка: "пробило рівень 1 — чекаю рівень 2")
     while step <= len(ladder) and zone_broken(ladder[step - 1], df5, trend):
         step += 1
     state[f"{pair}_series_step"] = step
@@ -899,7 +913,6 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
     atr_ratio = compute_atr_ratio(df5, 14, 20)
     now_dt = datetime.now(TZ)
 
-    # FIX 32: локальний тренд M5 для повідомлення
     er5 = efficiency_ratio(df5["Close"], 24)
     if len(df5) >= 25:
         net5 = float(df5["Close"].iloc[-1] - df5["Close"].iloc[-25])
@@ -915,7 +928,6 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         if not in_zone(current_price, level, trend): continue
         if not approach_ok(df5, level, trend): continue
 
-        # FIX 31: той самий рівень не частіше ніж раз на LEVEL_REPEAT_MIN
         signal_key = f"{pair}_{trend}_level{level['level']}_sent_at"
         sent_at = state.get(signal_key)
         if sent_at:
@@ -959,7 +971,6 @@ def run_cycle(state: dict) -> None:
             break
         lvl = cand["level"]
 
-        # FIX 31: ліміт нових L1 за годину (каскади L2/POC не обмежуємо)
         if lvl["level"] == 1 and l1_recent_count(state) >= MAX_L1_PER_HOUR:
             print(f"[ліміт] {cand['pair']}: L1 пропущено — ліміт {MAX_L1_PER_HOUR}/год")
             continue
@@ -969,7 +980,6 @@ def run_cycle(state: dict) -> None:
                             cand["er"], cand.get("er5", 0.0), cand.get("loc_dir", ""))
         sent_ok = send_telegram_message(msg)
 
-        # FIX 33: журнал пише тільки те, що реально відбулось
         if sent_ok:
             state[f"{cand['pair']}_{cand['trend']}_level{lvl['level']}_sent_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
             mark_signal_sent(state, cand["pair"])
@@ -1017,17 +1027,14 @@ def process_outcomes(state: dict) -> None:
             print(f"[результат] {o['pair']} {o['dir']} L{o.get('level')}: {'WIN' if win else 'LOSS'}")
 
             if win:
-                # FIX 31 + FIX 36: WIN закриває серію і ставить паузу по парі
                 state[f"{o['pair']}_done_sig"] = o.get("sig", "")
                 state[f"{o['pair']}_abandon_until"] = time.time() + WIN_PAUSE_MIN * 60
                 state[f"{o['pair']}_series_step"] = 1
             elif o.get("level") == 3:
-                # LOSS на POC — серія завершена, пауза
                 state[f"{o['pair']}_done_sig"] = o.get("sig", "")
                 state[f"{o['pair']}_abandon_until"] = time.time() + ABANDON_MIN * 60
                 state[f"{o['pair']}_series_step"] = 1
             else:
-                # FIX 36: LOSS на L1/L2 — серія переходить на наступний крок
                 state[f"{o['pair']}_series_step"] = int(o.get("level", 1)) + 1
 
         except Exception:
@@ -1048,6 +1055,8 @@ def main_loop() -> None:
             process_outcomes(state)
             process_trajectory(state)
             run_cycle(state)
+            # FIX 39: heartbeat — видно, що бот живий і цикл завершився
+            print(f"[цикл] {datetime.now(TZ).strftime('%H:%M')} OK | відкритих серій: {len(state.get('pending_outcomes', []))}")
             if datetime.now(TZ).hour == DAILY_REPORT_HOUR and datetime.now(TZ).minute >= DAILY_REPORT_MINUTE:
                 send_daily_report(state)
             check_tracking_health(state)
