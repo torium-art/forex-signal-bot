@@ -127,3 +127,5 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-21 13:40,GBPCHF,BUY,2,1.1046,1.10475,1.10469,15,33.6,3.47,0.226,structure48,True,sent,0.0,0.938,weak,10,2,False
 2026-10-21 13:52,GBPCHF,BUY,1,1.10475,1.10489,1.10486,5,34.4,2.46,0.233,structure48,True,sent,0.0,0.908,weak,10,2,False
 2026-10-21 14:05,GBPCHF,BUY,3,1.10359,1.10446,1.10439,15,207.6,54.68,0.204,structure48,True,sent,0.0,0.868,strong,11,2,False
+2026-10-21 18:45,AUDCAD,BUY,1,0.9882,0.98835,0.98834,5,37.5,1.52,0.275,structure24,True,sent,0.0,1.006,weak,15,2,False
+2026-10-21 19:23,GBPCAD,BUY,1,1.88157,1.88246,1.88246,5,96.4,22.68,0.168,structure24,True,sent,0.0,0.746,strong,16,2,False
