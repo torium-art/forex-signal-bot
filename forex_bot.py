@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v30.1
+Forex Price-Action Signal Bot — v30.2
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -33,6 +33,10 @@ FIX 45: Візуальні полиці — Л2 має мати дотики з 
 FIX 46: Адаптивна ширина зони — мін. 30% ATR, консолідація 3+ свічки
 FIX 47: Виправлено score = 0 (тепер рахується правильно)
 FIX 48: НОВИЙ ДИЗАЙН повідомлень — рамка з кольорових квадратів, прогрес-бари, дашборд
+FIX 49: білий список Medium-новин (claims, crude oil, monetary policy тощо)
+FIX 50: алерт у Telegram, якщо календар новин недоступний >6 год
+FIX 51: ранковий огляд новин на день (~10:00) одним повідомленням
+FIX 52: одне попередження на подію, а не на кожну пару
 """
 import csv
 import json
@@ -127,21 +131,16 @@ DIV = "┈" * 22
 MAX_SCORE = 150
 DIRECTION = {
     "BUY": ("🟢", "▲", "BUY (CALL)"),
-    "SELL": ("", "▼", "SELL (PUT)")
+    "SELL": ("🔴", "▼", "SELL (PUT)")
 }
 STRENGTH = {
     "vweak": ("🔴", "ДУЖЕ СЛАБКИЙ"),
-    "weak": ("", "СЛАБКИЙ"),
+    "weak": ("🟠", "СЛАБКИЙ"),
     "medium": ("🟡", "ПОМІРНИЙ"),
     "strong": ("🟢", "СИЛЬНИЙ")
 }
 ICON = {k: v[0] for k, v in STRENGTH.items()}
 SCALE = {"zone": 20.0, "trend": 1.0, "pullback": 1.0}
-
-DAILY_REPORT_HOUR = 19
-DAILY_REPORT_MINUTE = 55
-WEEKLY_REPORT_DAY = 6
-WEEKLY_REPORT_HOUR = 20
 
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEWS_CACHE_TTL_HOURS = 4
@@ -149,9 +148,24 @@ NEWS_BEFORE_MIN = 25
 NEWS_AFTER_MIN = 20
 WATCHED_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"}
 
+# FIX 49: Medium-новини, які реально рухають ринок і мають блокувати пари
+MEDIUM_BLOCK_KEYWORDS = [
+    "claims", "crude oil", "natural gas", "monetary policy", "interest rate",
+    "cpi", "ppi", "gdp", "retail", "pmi", "nonfarm", "fomc",
+    "trade balance", "consumer price", "unemployment",
+]
+
+# FIX 50: максимальний вік кешу новин, після якого кричимо тривогу
+NEWS_MAX_AGE_HOURS = 6
+
 TRAJECTORY_POINTS = [2, 4, 6, 8, 10, 12, 14]
 TRACKING_HEALTH_HOURS = 24
 TRACKING_EMERGENCY_HOURS = 48
+
+DAILY_REPORT_HOUR = 19
+DAILY_REPORT_MINUTE = 55
+WEEKLY_REPORT_DAY = 6
+WEEKLY_REPORT_HOUR = 20
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(BASE_DIR, "last_signals.json")
@@ -501,8 +515,8 @@ def build_entry_ladder(window_profile: pd.DataFrame, trend: str, pair: str):
         return []
     max_width = MAX_ZONE_WIDTH_ATR * atr
     cells = compute_volume_profile(window_profile, profile_low, profile_high)
-    zones = [z for z in build_volume_zones(cells, max_width) 
-             if z["touches"] >= MIN_ZONE_TOUCHES 
+    zones = [z for z in build_volume_zones(cells, max_width)
+             if z["touches"] >= MIN_ZONE_TOUCHES
              and is_zone_valid(z, window_profile, pair, atr)]
     if not zones:
         return []
@@ -652,16 +666,107 @@ def send_telegram_message(html_text: str) -> bool:
     return True
 
 
+# ============================================================
+# НОВИНИ: FIX 37 + FIX 49 + FIX 50 + FIX 51 + FIX 52
+# ============================================================
+def _news_event_ok(e: dict) -> bool:
+    """FIX 49: High беремо всі; Medium — тільки з білого списку ключових слів."""
+    imp = e.get("impact")
+    if imp == "High":
+        return True
+    if imp == "Medium":
+        title = e.get("title", "").lower()
+        return any(k in title for k in MEDIUM_BLOCK_KEYWORDS)
+    return False
+
+
+def _load_news_cache():
+    if not os.path.exists(NEWS_CACHE_FILE): return None
+    try:
+        with open(NEWS_CACHE_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    except Exception: return None
+
+
+def fetch_high_impact_events():
+    now = datetime.now(TZ)
+    cache = _load_news_cache()
+    if cache and cache.get("fetched_at"):
+        try:
+            age = (now - datetime.fromisoformat(cache["fetched_at"])).total_seconds() / 3600
+            if age < NEWS_CACHE_TTL_HOURS:
+                return [{"title": e["title"], "currency": e["country"],
+                         "time": datetime.fromisoformat(e["date"].replace("Z", "+00:00")).astimezone(TZ)}
+                        for e in cache["data"]
+                        if _news_event_ok(e) and e.get("country") in WATCHED_CURRENCIES]
+        except Exception: pass
+
+    try:
+        resp = requests.get(NEWS_CALENDAR_URL, timeout=15)
+        if resp.status_code == 200:
+            raw = resp.json()
+            with open(NEWS_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"fetched_at": now.isoformat(), "data": raw}, f)
+            return [{"title": e["title"], "currency": e["country"],
+                     "time": datetime.fromisoformat(e["date"].replace("Z", "+00:00")).astimezone(TZ)}
+                    for e in raw
+                    if _news_event_ok(e) and e.get("country") in WATCHED_CURRENCIES]
+    except Exception: pass
+    return []
+
+
+def news_health_alert(state: dict) -> None:
+    """FIX 50: якщо календар старий або відсутній у торговий час — тривога раз на день."""
+    if not in_trading_window():
+        return
+    age_h = 999.0
+    cache = _load_news_cache()
+    if cache and cache.get("fetched_at"):
+        try:
+            age_h = (datetime.now(TZ) - datetime.fromisoformat(cache["fetched_at"])).total_seconds() / 3600
+        except Exception:
+            age_h = 999.0
+    if age_h > NEWS_MAX_AGE_HOURS and (time.time() - state.get("last_news_alert", 0)) > 86400:
+        if send_telegram_message(
+            f"⚠️ <b>Календар новин недоступний</b> (останнє оновлення: {age_h:.0f} год тому).\n"
+            f"Фільтр новин ВИМКНЕНИЙ — перед входом перевіряй календар брокера вручну!"
+        ):
+            state["last_news_alert"] = time.time()
+
+
+def send_daily_news_calendar(state: dict) -> None:
+    """FIX 51: раз на день (~10:00) шле список блокувальних новин на сьогодні."""
+    now = datetime.now(TZ)
+    today = now.strftime("%Y-%m-%d")
+    if state.get("last_news_calendar") == today:
+        return
+    events = fetch_high_impact_events()
+    todays = [e for e in events
+              if e["time"].strftime("%Y-%m-%d") == today
+              and e["time"] >= now - timedelta(minutes=NEWS_AFTER_MIN)]
+    todays.sort(key=lambda e: e["time"])
+    lines = [f"📅 <b>Календар новин на {today} (дані бота)</b>"]
+    if todays:
+        for e in todays[:14]:
+            lines.append(f"• {e['time'].strftime('%H:%M')} {e['currency']} — {e['title']}")
+        if len(todays) > 14:
+            lines.append(f"• …і ще {len(todays) - 14}")
+    else:
+        lines.append("• важливих новин у списку немає (High + білий список Medium)")
+    lines.append(f"<i>Бот блокує відповідні пари за {NEWS_BEFORE_MIN} хв до і {NEWS_AFTER_MIN} хв після кожної події.</i>")
+    if send_telegram_message("\n".join(lines)):
+        state["last_news_calendar"] = today
+
+
 def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
-    clean_pair = pair.replace("=X", "")
-    key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
+    """FIX 37 + FIX 52: ОДНЕ попередження на подію (не на кожну пару)."""
+    key = f"news_{event['title']}_{event['time'].strftime('%Y%m%d%H%M')}"
     if state.get(key):
         return
-    msg = (f"⚠️ <b>Скоро важлива новина: {clean_pair}</b>\n"
-           f"Подія: {event['title']} ({event['currency']})\n"
+    msg = (f"⚠️ <b>Скоро важлива новина: {event['title']} ({event['currency']})</b>\n"
            f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
-           f"Рекомендація: не торгувати ~{NEWS_BEFORE_MIN} хв до і "
-           f"~{NEWS_AFTER_MIN} хв після.")
+           f"Бот блокує всі пари з {event['currency']} за {NEWS_BEFORE_MIN} хв до "
+           f"і {NEWS_AFTER_MIN} хв після.\n"
+           f"Рекомендація: не торгуй ці валюти вручну у цьому вікні.")
     if send_telegram_message(msg):
         state[key] = True
 
@@ -769,12 +874,14 @@ def send_daily_report(state: dict) -> None:
     wins = sum(1 for o in today_outcomes if o.get("result") == "WIN")
     losses = sum(1 for o in today_outcomes if o.get("result") == "LOSS")
 
-    msg = f" <b>Підсумок дня: {today}</b>\n📍 Сигналів: {len(today_signals)}\n✅ WIN: {wins} | ❌ LOSS: {losses}\n"
+    msg = f"📊 <b>Підсумок дня: {today}</b>\n📍 Сигналів: {len(today_signals)}\n✅ WIN: {wins} | ❌ LOSS: {losses}\n"
     if wins+losses > 0: msg += f"📈 Winrate: <b>{wins/(wins+losses)*100:.1f}%</b>\n"
     if send_telegram_message(msg): state["last_daily_report"] = today
 
 
-# FIX 48: Новий дизайн повідомлень
+# ============================================================
+# FIX 48: НОВИЙ ДИЗАЙН ПОВІДОМЛЕНЬ
+# ============================================================
 def _vis_len(t: str) -> int:
     """Емодзі ≈ вдвічі ширші за символи."""
     return sum(2 if ord(c) >= 0x2100 else 1 for c in t)
@@ -787,23 +894,19 @@ def color_frame(lines: list, sq: str) -> str:
 
 
 def bar(value: float, vmax: float, size: int = 10) -> str:
-    """Прогрес-бар."""
     n = max(0, min(size, round(value / vmax * size)))
     return "█" * n + "░" * (size - n)
 
 
 def metric(icon, value, vmax, name, val_txt, label):
-    """Метрика з прогрес-баром."""
     return f"<code>[{bar(value, vmax)}]</code> {icon} {name} <code>{val_txt}</code> — {label}"
 
 
 def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bool,
                   source: str, score: float, er: float,
                   er5: float = 0.0, loc_dir: str = "") -> str:
-    """FIX 48: Новий дизайн повідомлень з рамкою та дашбордом."""
     clean_pair = pair.replace("=X", "")
-    
-    # Визначаємо класифікацію
+
     if score >= 80:
         strength_class = "strong"
     elif score >= 50:
@@ -812,13 +915,12 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         strength_class = "weak"
     else:
         strength_class = "vweak"
-    
+
     e, strength_label = STRENGTH[strength_class]
     c, arrow, dtx = DIRECTION[trend]
     sq = "🟩" if trend == "BUY" else "🟥"
     pct = round(score / MAX_SCORE * 100)
-    
-    # Класифікація метрик для іконок
+
     zone_power = float(level["strength"]) * 100
     if zone_power < 5:
         zone_r = "vweak"
@@ -828,7 +930,7 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         zone_r = "medium"
     else:
         zone_r = "strong"
-    
+
     if er >= 0.45:
         trend_r = "strong"
     elif er >= 0.30:
@@ -837,7 +939,7 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         trend_r = "weak"
     else:
         trend_r = "vweak"
-    
+
     if er5 >= 0.30:
         pullback_r = "strong"
     elif er5 >= 0.15:
@@ -846,18 +948,16 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         pullback_r = "weak"
     else:
         pullback_r = "vweak"
-    
-    # Визначаємо мітки
+
     side = "підтримка" if trend == "BUY" else "опір"
-    
+
     if level["level"] == 1:
         level_note = "перший ретест після пробою"
     elif level["level"] == 2:
         level_note = "перекриття х2 (серія після мінуса)"
     else:
         level_note = "фінальне перекриття (POC)"
-    
-    # Визначаємо пораду
+
     if zone_power < 5:
         advice = "зона дуже слабка за об'ємом — краще пропустити або чекати наступний рівень."
     elif zone_power < 10:
@@ -868,8 +968,7 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         advice = "сильний сетап — можна входити."
     else:
         advice = "нейтральний сетап — на твій розсуд."
-    
-    # Визначаємо попередження
+
     warning = ""
     if loc_dir:
         pullback = (loc_dir == "up" and trend == "SELL") or (loc_dir == "down" and trend == "BUY")
@@ -878,13 +977,12 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
             warning = "відкат ще імпульсний — може пробити зону, чекай реакції" if er5 >= 0.30 else "відкат вигас біля зони — гарні умови для входу"
         elif with_sig:
             warning = "ціна вже йде за сигналом — запізнення або пробій"
-    
+
     if breakout:
         warning = "імпульсна свічка зараз — входь тільки в зоні, не женись за ціною"
-    
-    # Формуємо повідомлення
+
     time_str = datetime.now(TZ).strftime("%H:%M")
-    
+
     L = [
         color_frame([
             f"{c} {arrow} {clean_pair} · {dtx}",
@@ -896,23 +994,23 @@ def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bo
         DIV,
         f"📊 <b>ДАШБОРД СИГНАЛУ</b>",
         f"<code>[{bar(score, MAX_SCORE)}]</code> <b>Сила сигналу</b> <code>{score:.0f}/{MAX_SCORE}</code> · {pct}%",
-        metric(ICON[zone_r], zone_power, SCALE["zone"], "Сила зони", f"{zone_power:.1f}%", 
+        metric(ICON[zone_r], zone_power, SCALE["zone"], "Сила зони", f"{zone_power:.1f}%",
                "дуже слабка" if zone_r == "vweak" else "слабка" if zone_r == "weak" else "помірна" if zone_r == "medium" else "сильна"),
         metric(ICON[trend_r], er, SCALE["trend"], "Тренд M30", f"{er:.2f}",
                "слабкий" if trend_r == "vweak" else "помірний" if trend_r == "weak" else "сильний" if trend_r == "medium" else "дуже сильний"),
         metric(ICON[pullback_r], er5, SCALE["pullback"], "Відкат M5", f"{er5:.2f}",
                "слабкий" if pullback_r == "vweak" else "помірний" if pullback_r == "weak" else "сильний" if pullback_r == "medium" else "дуже сильний"),
     ]
-    
+
     if warning:
         L.append(f"⚠️ <i>{warning}</i>")
-    
+
     L += [
         DIV,
         f"💡 <b>Висновок:</b> {advice}",
         f"🕐 <i>{datetime.now(TZ).strftime('%d.%m.%Y %H:%M')} · Kyiv</i>"
     ]
-    
+
     return "\n".join(L)
 
 
@@ -932,34 +1030,6 @@ def outcome_write(row: dict) -> None:
         w.writerow(row)
 
 
-def _load_news_cache():
-    if not os.path.exists(NEWS_CACHE_FILE): return None
-    try:
-        with open(NEWS_CACHE_FILE, "r", encoding="utf-8") as f: return json.load(f)
-    except Exception: return None
-
-
-def fetch_high_impact_events():
-    now = datetime.now(TZ)
-    cache = _load_news_cache()
-    if cache and cache.get("fetched_at"):
-        try:
-            age = (now - datetime.fromisoformat(cache["fetched_at"])).total_seconds() / 3600
-            if age < NEWS_CACHE_TTL_HOURS:
-                return [{"title": e["title"], "currency": e["country"], "time": datetime.fromisoformat(e["date"].replace("Z", "+00:00")).astimezone(TZ)} for e in cache["data"] if e.get("impact") == "High" and e.get("country") in WATCHED_CURRENCIES]
-        except Exception: pass
-
-    try:
-        resp = requests.get(NEWS_CALENDAR_URL, timeout=15)
-        if resp.status_code == 200:
-            raw = resp.json()
-            with open(NEWS_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump({"fetched_at": now.isoformat(), "data": raw}, f)
-            return [{"title": e["title"], "currency": e["country"], "time": datetime.fromisoformat(e["date"].replace("Z", "+00:00")).astimezone(TZ)} for e in raw if e.get("impact") == "High" and e.get("country") in WATCHED_CURRENCIES]
-    except Exception: pass
-    return []
-
-
 def evaluate_pair(pair: str, state: dict, news_events: list):
     for ev in news_events:
         clean = pair.replace("=X", "")
@@ -969,7 +1039,7 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
 
     series_state = state.get(f"{pair}_series_state", "SCANNING")
     frozen_until = state.get(f"{pair}_frozen_until", 0)
-    
+
     if time.time() < frozen_until:
         return None
 
@@ -1014,7 +1084,7 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         return None
 
     l1, l2, l3 = ladder[0], ladder[1], ladder[2]
-    
+
     if l3["strength"] < MIN_POC_STRENGTH:
         return None
 
@@ -1070,19 +1140,19 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
                         "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
                         "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
                         "next_state": "L3_ACTIVE"}
-        
+
         series_started = state.get(f"{pair}_series_started_at", 0)
         time_since_l2 = time.time() - series_started
         if time_since_l2 > L2_TIMEOUT_MIN * 60:
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.1] {pair}: таймер Л2 вийшов, серія закрита")
+            print(f"[v30.2] {pair}: таймер Л2 вийшов, серія закрита")
             return None
-        
+
         if zone_broken(l2, df5, trend):
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.1] {pair}: Л2 пробито, серія закрита")
+            print(f"[v30.2] {pair}: Л2 пробито, серія закрита")
             return None
 
     elif series_state == "WAITING_L3":
@@ -1094,26 +1164,27 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
                     "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
                     "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
                     "next_state": "L3_ACTIVE"}
-        
+
         waiting_since = state.get(f"{pair}_waiting_l3_since", 0)
         time_waiting = time.time() - waiting_since
         if time_waiting > L3_WAIT_MIN * 60:
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.1] {pair}: таймер Л3 вийшов, серія закрита")
+            print(f"[v30.2] {pair}: таймер Л3 вийшов, серія закрита")
             return None
-        
+
         if zone_broken(l2, df5, trend):
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.1] {pair}: Л2 пробито під час очікування Л3, серія закрита")
+            print(f"[v30.2] {pair}: Л2 пробито під час очікування Л3, серія закрита")
             return None
 
     return None
 
 
-def run_cycle(state: dict) -> None:
-    news_events = fetch_high_impact_events()
+def run_cycle(state: dict, news_events: list = None) -> None:
+    if news_events is None:
+        news_events = fetch_high_impact_events()
     candidates = []
     for pair in PAIRS:
         try:
@@ -1142,14 +1213,14 @@ def run_cycle(state: dict) -> None:
         if sent_ok:
             state[f"{cand['pair']}_{cand['trend']}_level{lvl['level']}_sent_at"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
             mark_signal_sent(state, cand["pair"])
-            
+
             next_state = cand.get("next_state", "SCANNING")
             state[f"{cand['pair']}_series_state"] = next_state
             if next_state == "L2_ACTIVE":
                 state[f"{cand['pair']}_series_started_at"] = time.time()
             elif next_state == "WAITING_L3":
                 state[f"{cand['pair']}_waiting_l3_since"] = time.time()
-            
+
             if lvl["is_poc"]:
                 state[f"{cand['pair']}_done_sig"] = cand["sig"]
             state.setdefault("pending_outcomes", []).append({
@@ -1228,8 +1299,12 @@ def main_loop() -> None:
                 continue
             process_outcomes(state)
             process_trajectory(state)
-            run_cycle(state)
-            print(f"[цикл] {datetime.now(TZ).strftime('%H:%M')} OK | відкритих серій: {len(state.get('pending_outcomes', []))}")
+            news_events = fetch_high_impact_events()
+            run_cycle(state, news_events)
+            # FIX 39 + лічильник новин: видно, що фільтр живий
+            print(f"[цикл] {datetime.now(TZ).strftime('%H:%M')} OK | відкритих серій: {len(state.get('pending_outcomes', []))} | новин: {len(news_events)}")
+            send_daily_news_calendar(state)
+            news_health_alert(state)
             if datetime.now(TZ).hour == DAILY_REPORT_HOUR and datetime.now(TZ).minute >= DAILY_REPORT_MINUTE:
                 send_daily_report(state)
             check_tracking_health(state)
