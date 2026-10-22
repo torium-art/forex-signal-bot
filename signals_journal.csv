@@ -136,3 +136,7 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-22 11:56,AUDCAD,SELL,2,0.98309,0.98475,0.98314,15,0.0,23.8,0.209,structure24,True,sent,0.0,0.915,strong,8,3,False
 2026-10-22 12:13,CADCHF,SELL,1,0.58485,0.58511,0.58492,5,0.0,4.08,0.18,structure24,True,sent,0.0,1.037,weak,9,3,False
 2026-10-22 12:34,CADJPY,SELL,1,111.97387,112.0288,111.977,5,0.0,4.0,0.228,structure24,True,sent,0.0,0.95,weak,9,3,False
+2026-10-22 14:23,AUDCAD,SELL,1,0.9824,0.98284,0.98245,5,0.0,7.72,0.269,structure24,True,sent,0.0,1.024,medium,11,3,False
+2026-10-22 14:30,GBPCHF,SELL,1,1.09802,1.09855,1.09825,5,0.0,4.79,0.36,structure24,True,sent,0.0,1.028,weak,11,3,False
+2026-10-22 14:32,EURCHF,SELL,1,0.92029,0.92125,0.92052,5,0.0,11.04,0.408,structure24,True,sent,0.0,0.967,medium,11,3,False
+2026-10-22 14:34,USDJPY,SELL,1,156.9026,157.0134,156.91901,5,0.0,7.08,0.291,structure24,True,sent,0.0,0.877,medium,11,3,False
