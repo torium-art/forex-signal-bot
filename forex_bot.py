@@ -32,6 +32,7 @@ FIX 44: Фільтр рівномірності драбини — Л2 на 30-7
 FIX 45: Візуальні полиці — Л2 має мати дотики з обох сторін (above/below >= 2)
 FIX 46: Адаптивна ширина зони — мін. 30% ATR, консолідація 3+ свічки
 FIX 47: Виправлено score = 0 (тепер рахується правильно)
+FIX 48: НОВИЙ ДИЗАЙН повідомлень — рамка з кольорових квадратів, прогрес-бари, дашборд
 """
 import csv
 import json
@@ -113,20 +114,29 @@ FREEZE_MIN = 40
 
 MIN_POC_STRENGTH = 0.10
 
-# FIX 43: Денний POC
-MIN_DAILY_CANDLES = 60  # мінімум 5 годин для денного POC
-
-# FIX 44: Рівномірність драбини
+MIN_DAILY_CANDLES = 60
 MIN_LEVEL_DISTANCE_PIPS = 10
 L2_POSITION_MIN = 0.30
 L2_POSITION_MAX = 0.70
-
-# FIX 45: Візуальні полиці
 MIN_TWO_SIDED_TOUCHES = 2
+MIN_ZONE_WIDTH_ATR = 0.30
+MIN_CANDLES_IN_ZONE = 3
 
-# FIX 46: Адаптивна ширина зони
-MIN_ZONE_WIDTH_ATR = 0.30  # мін. 30% від ATR
-MIN_CANDLES_IN_ZONE = 3    # мін. 3 свічки в зоні (консолідація)
+# FIX 48: Константи для нового дизайну
+DIV = "┈" * 22
+MAX_SCORE = 150
+DIRECTION = {
+    "BUY": ("🟢", "▲", "BUY (CALL)"),
+    "SELL": ("", "▼", "SELL (PUT)")
+}
+STRENGTH = {
+    "vweak": ("🔴", "ДУЖЕ СЛАБКИЙ"),
+    "weak": ("", "СЛАБКИЙ"),
+    "medium": ("🟡", "ПОМІРНИЙ"),
+    "strong": ("🟢", "СИЛЬНИЙ")
+}
+ICON = {k: v[0] for k, v in STRENGTH.items()}
+SCALE = {"zone": 20.0, "trend": 1.0, "pullback": 1.0}
 
 DAILY_REPORT_HOUR = 19
 DAILY_REPORT_MINUTE = 55
@@ -438,77 +448,52 @@ def _mk_level(idx: int, z: dict, is_poc: bool) -> dict:
             "expiry_min": expiry}
 
 
-# FIX 43: Денний POC
 def get_daily_profile_window(df5: pd.DataFrame) -> pd.DataFrame:
-    """Бере тільки свічки M5 з початку поточного торгового дня."""
     if df5.empty:
         return df5
-    
     today_start = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     mask = df5.index >= today_start
     window = df5[mask]
-    
     if len(window) < MIN_DAILY_CANDLES:
         window = df5.tail(MIN_DAILY_CANDLES)
-    
     return window
 
 
-# FIX 46: Адаптивна ширина зони
 def is_zone_valid(zone: dict, df5: pd.DataFrame, pair: str, atr: float) -> bool:
-    """Перевіряє, чи зона достатньо широка і має консолідацію."""
     pips_multiplier = 100 if "JPY" in pair else 10000
     width_pips = (zone["hi"] - zone["lo"]) * pips_multiplier
-    
-    # Мін. ширина = 30% від ATR
     min_width_pips = atr * pips_multiplier * MIN_ZONE_WIDTH_ATR
     if width_pips < min_width_pips:
         return False
-    
-    # Кількість свічок всередині зони
     candles_in_zone = df5[
         (df5["Low"] <= zone["hi"]) & (df5["High"] >= zone["lo"])
     ]
-    
     if len(candles_in_zone) < MIN_CANDLES_IN_ZONE:
         return False
-    
     return True
 
 
-# FIX 44+45: Рівномірність + візуальні полиці
 def is_ladder_balanced(l1: dict, l2: dict, l3: dict, pair: str) -> bool:
-    """Перевіряє рівномірність драбини та візуальні полиці."""
     l1_c = (l1["lo"] + l1["hi"]) / 2
     l2_c = (l2["lo"] + l2["hi"]) / 2
     l3_c = (l3["lo"] + l3["hi"]) / 2
-    
     total_distance = abs(l3_c - l1_c)
     if total_distance == 0:
         return False
-    
     l2_position = abs(l2_c - l1_c) / total_distance
-    
     if not (L2_POSITION_MIN <= l2_position <= L2_POSITION_MAX):
         return False
-    
     pips_multiplier = 100 if "JPY" in pair else 10000
-    
     l1_l2_pips = abs(l2_c - l1_c) * pips_multiplier
     l2_l3_pips = abs(l3_c - l2_c) * pips_multiplier
-    
     if l1_l2_pips < MIN_LEVEL_DISTANCE_PIPS or l2_l3_pips < MIN_LEVEL_DISTANCE_PIPS:
         return False
-    
-    # FIX 45: Л2 має мати чіткі дотики з обох сторін
     if l2.get("above", 0) < MIN_TWO_SIDED_TOUCHES or l2.get("below", 0) < MIN_TWO_SIDED_TOUCHES:
         return False
-    
     return True
 
 
 def build_entry_ladder(window_profile: pd.DataFrame, trend: str, pair: str):
-    """FIX 40+41+43+44+45+46: будує драбину Л1-Л2-Л3 з денним POC."""
     profile_low = window_profile["Low"].min()
     profile_high = window_profile["High"].max()
     atr = compute_atr(window_profile, 14)
@@ -516,20 +501,15 @@ def build_entry_ladder(window_profile: pd.DataFrame, trend: str, pair: str):
         return []
     max_width = MAX_ZONE_WIDTH_ATR * atr
     cells = compute_volume_profile(window_profile, profile_low, profile_high)
-    
-    # FIX 46: фільтр адаптивної ширини
     zones = [z for z in build_volume_zones(cells, max_width) 
              if z["touches"] >= MIN_ZONE_TOUCHES 
              and is_zone_valid(z, window_profile, pair, atr)]
-    
     if not zones:
         return []
-    
     poc = max(zones, key=lambda z: z["share"])
     poc_c = (poc["lo"] + poc["hi"]) / 2
     others = [z for z in zones if z is not poc]
     current_price = float(window_profile["Close"].iloc[-1])
-    
     if trend == "BUY":
         if poc_c >= current_price:
             return []
@@ -540,13 +520,10 @@ def build_entry_ladder(window_profile: pd.DataFrame, trend: str, pair: str):
             return []
         path = [z for z in others if current_price <= (z["lo"] + z["hi"]) / 2 <= poc_c]
         path.sort(key=lambda z: (z["lo"] + z["hi"]) / 2)
-    
     if not path:
         return []
-    
     l1 = path[0]
     l1_c = (l1["lo"] + l1["hi"]) / 2
-    
     l2_candidates = []
     for z in path[1:]:
         z_c = (z["lo"] + z["hi"]) / 2
@@ -556,25 +533,18 @@ def build_entry_ladder(window_profile: pd.DataFrame, trend: str, pair: str):
         else:
             if l1_c < z_c < poc_c:
                 l2_candidates.append(z)
-    
     if not l2_candidates:
         return []
-    
     l2 = max(l2_candidates, key=lambda z: z["share"])
-    
     if poc["share"] < MIN_POC_STRENGTH:
         return []
-    
     ladder = [
         _mk_level(1, l1, False),
         _mk_level(2, l2, False),
         _mk_level(3, poc, True)
     ]
-    
-    # FIX 44+45: перевірка рівномірності та візуальних полиць
     if not is_ladder_balanced(ladder[0], ladder[1], ladder[2], pair):
         return []
-    
     return ladder
 
 
@@ -687,7 +657,7 @@ def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
     key = f"news_{clean_pair}{event['title']}{event['time'].strftime('%Y%m%d%H%M')}"
     if state.get(key):
         return
-    msg = (f"️ <b>Скоро важлива новина: {clean_pair}</b>\n"
+    msg = (f"⚠️ <b>Скоро важлива новина: {clean_pair}</b>\n"
            f"Подія: {event['title']} ({event['currency']})\n"
            f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
            f"Рекомендація: не торгувати ~{NEWS_BEFORE_MIN} хв до і "
@@ -765,10 +735,10 @@ def check_tracking_health(state: dict) -> None:
     if not os.path.exists(TRAJECTORY_FILE): return
     age_hours = (time.time() - os.path.getmtime(TRAJECTORY_FILE)) / 3600
     if age_hours > TRACKING_HEALTH_HOURS and (time.time() - state.get("last_health_alert", 0)) > 86400:
-        if send_telegram_message(f"️ <b>Трекінг не пише {age_hours:.0f} год</b>"):
+        if send_telegram_message(f"⚠️ <b>Трекінг не пише {age_hours:.0f} год</b>"):
             state["last_health_alert"] = time.time()
     if age_hours > TRACKING_EMERGENCY_HOURS and (time.time() - state.get("last_emergency_alert", 0)) > 86400:
-        if send_telegram_message(f" <b>ТРЕКІНГ МЕРТВИЙ >{TRACKING_EMERGENCY_HOURS} год</b>"):
+        if send_telegram_message(f"🚨 <b>ТРЕКІНГ МЕРТВИЙ >{TRACKING_EMERGENCY_HOURS} год</b>"):
             state["last_emergency_alert"] = time.time()
 
 
@@ -777,7 +747,7 @@ def send_weekly_tech_report(state: dict) -> None:
     if now.weekday() != WEEKLY_REPORT_DAY or now.hour != WEEKLY_REPORT_HOUR: return
     week_key = now.strftime("%Y-%W")
     if state.get("last_weekly_report") == week_key: return
-    msg = f"📊 <b>Тижневий технічний звіт</b>\n {now.strftime('%Y-%m-%d %H:%M')} (Kyiv)"
+    msg = f"📊 <b>Тижневий технічний звіт</b>\n⏰ {now.strftime('%Y-%m-%d %H:%M')} (Kyiv)"
     if send_telegram_message(msg): state["last_weekly_report"] = week_key
 
 
@@ -799,113 +769,151 @@ def send_daily_report(state: dict) -> None:
     wins = sum(1 for o in today_outcomes if o.get("result") == "WIN")
     losses = sum(1 for o in today_outcomes if o.get("result") == "LOSS")
 
-    msg = f"📊 <b>Підсумок дня: {today}</b>\n📍 Сигналів: {len(today_signals)}\n✅ WIN: {wins} | ❌ LOSS: {losses}\n"
+    msg = f" <b>Підсумок дня: {today}</b>\n📍 Сигналів: {len(today_signals)}\n✅ WIN: {wins} | ❌ LOSS: {losses}\n"
     if wins+losses > 0: msg += f"📈 Winrate: <b>{wins/(wins+losses)*100:.1f}%</b>\n"
     if send_telegram_message(msg): state["last_daily_report"] = today
+
+
+# FIX 48: Новий дизайн повідомлень
+def _vis_len(t: str) -> int:
+    """Емодзі ≈ вдвічі ширші за символи."""
+    return sum(2 if ord(c) >= 0x2100 else 1 for c in t)
+
+
+def color_frame(lines: list, sq: str) -> str:
+    """Рамка з кольорових квадратів: верх/низ + боки."""
+    top = sq * ((max(_vis_len(t) for t in lines) + 5) // 2)
+    return "\n".join([top, *[f"{sq} {t} {sq}" for t in lines], top])
+
+
+def bar(value: float, vmax: float, size: int = 10) -> str:
+    """Прогрес-бар."""
+    n = max(0, min(size, round(value / vmax * size)))
+    return "█" * n + "░" * (size - n)
+
+
+def metric(icon, value, vmax, name, val_txt, label):
+    """Метрика з прогрес-баром."""
+    return f"<code>[{bar(value, vmax)}]</code> {icon} {name} <code>{val_txt}</code> — {label}"
 
 
 def format_signal(pair: str, trend: str, price: float, level: dict, breakout: bool,
                   source: str, score: float, er: float,
                   er5: float = 0.0, loc_dir: str = "") -> str:
+    """FIX 48: Новий дизайн повідомлень з рамкою та дашбордом."""
     clean_pair = pair.replace("=X", "")
-
+    
+    # Визначаємо класифікацію
     if score >= 80:
-        head_emoji, quality = "", "СИЛЬНИЙ"
+        strength_class = "strong"
     elif score >= 50:
-        head_emoji, quality = "🟡", "СЕРЕДНІЙ"
+        strength_class = "medium"
+    elif score >= 30:
+        strength_class = "weak"
     else:
-        head_emoji, quality = "🟠", "СЛАБКИЙ"
-
-    direction = "🟢 BUY (CALL)" if trend == "BUY" else " SELL (PUT)"
-
-    if level["level"] == 1:
-        level_label = "1️⃣ Рівень 1 — перший ретест після пробою"
-    elif level["level"] == 2:
-        level_label = "2️⃣ Рівень 2 — перекриття х2 (серія після мінуса)"
+        strength_class = "vweak"
+    
+    e, strength_label = STRENGTH[strength_class]
+    c, arrow, dtx = DIRECTION[trend]
+    sq = "🟩" if trend == "BUY" else "🟥"
+    pct = round(score / MAX_SCORE * 100)
+    
+    # Класифікація метрик для іконок
+    zone_power = float(level["strength"]) * 100
+    if zone_power < 5:
+        zone_r = "vweak"
+    elif zone_power < 10:
+        zone_r = "weak"
+    elif zone_power < 15:
+        zone_r = "medium"
     else:
-        level_label = "3️⃣ Рівень 3 / POC — фінальне перекриття"
-
+        zone_r = "strong"
+    
+    if er >= 0.45:
+        trend_r = "strong"
+    elif er >= 0.30:
+        trend_r = "medium"
+    elif er >= 0.22:
+        trend_r = "weak"
+    else:
+        trend_r = "vweak"
+    
+    if er5 >= 0.30:
+        pullback_r = "strong"
+    elif er5 >= 0.15:
+        pullback_r = "medium"
+    elif er5 >= 0.10:
+        pullback_r = "weak"
+    else:
+        pullback_r = "vweak"
+    
+    # Визначаємо мітки
     side = "підтримка" if trend == "BUY" else "опір"
-
-    s = float(level["strength"])
-    if s >= 0.15: s_word = "сильна"
-    elif s >= 0.10: s_word = "середня"
-    elif s >= 0.05: s_word = "слабка"
-    else: s_word = "дуже слабка"
-
-    if er >= 0.45: er_word = "дуже сильний"
-    elif er >= 0.30: er_word = "сильний"
-    elif er >= 0.22: er_word = "помірний"
-    else: er_word = "слабкий"
-
-    if er5 >= 0.30: er5_word = "сильний"
-    elif er5 >= 0.15: er5_word = "помірний"
-    else: er5_word = "слабкий"
-
-    src_word = {"structure24": "свіжий (24 св. M30)",
-                "structure48": "старіший (48 св. M30)",
-                "ema200": "глобальний (EMA200)"}.get(source, source)
-
-    loc_line = ""
+    
+    if level["level"] == 1:
+        level_note = "перший ретест після пробою"
+    elif level["level"] == 2:
+        level_note = "перекриття х2 (серія після мінуса)"
+    else:
+        level_note = "фінальне перекриття (POC)"
+    
+    # Визначаємо пораду
+    if zone_power < 5:
+        advice = "зона дуже слабка за об'ємом — краще пропустити або чекати наступний рівень."
+    elif zone_power < 10:
+        advice = "зона слабка — не перекривай ставку."
+    elif er < 0.20:
+        advice = "тренд слабкий — обережно."
+    elif er >= 0.30 and zone_power >= 10:
+        advice = "сильний сетап — можна входити."
+    else:
+        advice = "нейтральний сетап — на твій розсуд."
+    
+    # Визначаємо попередження
+    warning = ""
     if loc_dir:
         pullback = (loc_dir == "up" and trend == "SELL") or (loc_dir == "down" and trend == "BUY")
         with_sig = (loc_dir == "up" and trend == "BUY") or (loc_dir == "down" and trend == "SELL")
         if pullback:
-            tail = ("⚠️ ще імпульсний — може пробити зону, чекай реакції"
-                    if er5 >= 0.30 else
-                    "✅ вигас біля зони — гарні умови для входу")
+            warning = "відкат ще імпульсний — може пробити зону, чекай реакції" if er5 >= 0.30 else "відкат вигас біля зони — гарні умови для входу"
         elif with_sig:
-            tail = "⚠️ ціна вже йде за сигналом — запізнення або пробій"
-        else:
-            tail = "➖ флет"
-        loc_line = f"• Відкат M5: {er5:.2f} ({er5_word}) · {tail}"
-
-    notes = []
-    if s < 0.05:
-        notes.append("зона дуже слабка по об'єму — краще пропустити або чекати наступний рівень")
-    elif s < 0.10:
-        notes.append("зона слабка по об'єму — не перекривай ставку")
-    if er < 0.20:
-        notes.append("тренд M30 слабкий — обережно")
-    elif er >= 0.30:
-        notes.append("тренд M30 прямий і сильний — це плюс")
-    if loc_dir and er5 >= 0.30 and ((loc_dir == "up" and trend == "SELL") or (loc_dir == "down" and trend == "BUY")):
-        notes.append("відкат на M5 ще імпульсний — зону може пробити, краще дочекатись реакції")
+            warning = "ціна вже йде за сигналом — запізнення або пробій"
+    
     if breakout:
-        notes.append("імпульсна свічка зараз — входь тільки в зоні, не женись за ціною")
-    if level["level"] == 2:
-        notes.append("перекриття: входь х2 тільки якщо попередній рівень серії був у тебе мінусом")
-    elif level["level"] == 1:
-        notes.append("перший ретест — найменший ризик")
-    elif level["is_poc"]:
-        notes.append("це POC — останній вхід перед можливим зломом тренду")
-    notes = notes[:4]
-    notes_block = "\n".join(f"• {n}" for n in notes) if notes else "• особливих зауважень немає"
-
-    lines = [
-        f"{head_emoji} <b>СИГНАЛ: {clean_pair} — {quality}</b>",
-        f"Напрямок: {direction}",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📍 <b>{level_label}</b>",
-        f"💰 Зона {side}: <code>{level['lo']:.5f} – {level['hi']:.5f}</code>",
-        f"💵 Вхід: <code>{price:.5f}</code>",
-        f"⏱ Експірація: {level['expiry_min']} хв",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "📊 <b>ЯКІСТЬ СИГНАЛУ</b>",
-        f"• Score: {score:.0f} (умовний макс ~150)",
-        f"• Сила зони: {s*100:.1f}% ({s_word})",
-        f"• Тренд M30: {er:.2f} ({er_word}) · {src_word}",
+        warning = "імпульсна свічка зараз — входь тільки в зоні, не женись за ціною"
+    
+    # Формуємо повідомлення
+    time_str = datetime.now(TZ).strftime("%H:%M")
+    
+    L = [
+        color_frame([
+            f"{c} {arrow} {clean_pair} · {dtx}",
+            f"{e} {strength_label} · ⏱ {level['expiry_min']} хв · {time_str}",
+        ], sq),
+        f"📍 <b>Рівень {level['level']}</b> — {level_note}",
+        f"💰 {side.capitalize()}: <code>{level['lo']:.5f} – {level['hi']:.5f}</code>",
+        f"🎯 Вхід: <code>{price:.5f}</code>",
+        DIV,
+        f"📊 <b>ДАШБОРД СИГНАЛУ</b>",
+        f"<code>[{bar(score, MAX_SCORE)}]</code> <b>Сила сигналу</b> <code>{score:.0f}/{MAX_SCORE}</code> · {pct}%",
+        metric(ICON[zone_r], zone_power, SCALE["zone"], "Сила зони", f"{zone_power:.1f}%", 
+               "дуже слабка" if zone_r == "vweak" else "слабка" if zone_r == "weak" else "помірна" if zone_r == "medium" else "сильна"),
+        metric(ICON[trend_r], er, SCALE["trend"], "Тренд M30", f"{er:.2f}",
+               "слабкий" if trend_r == "vweak" else "помірний" if trend_r == "weak" else "сильний" if trend_r == "medium" else "дуже сильний"),
+        metric(ICON[pullback_r], er5, SCALE["pullback"], "Відкат M5", f"{er5:.2f}",
+               "слабкий" if pullback_r == "vweak" else "помірний" if pullback_r == "weak" else "сильний" if pullback_r == "medium" else "дуже сильний"),
     ]
-    if loc_line:
-        lines.append(loc_line)
-    lines += [
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "💡 <b>ЩО ЦЕ ЗНАЧИТЬ</b>",
-        notes_block,
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"⏰ {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')} (Kyiv)",
+    
+    if warning:
+        L.append(f"⚠️ <i>{warning}</i>")
+    
+    L += [
+        DIV,
+        f"💡 <b>Висновок:</b> {advice}",
+        f"🕐 <i>{datetime.now(TZ).strftime('%d.%m.%Y %H:%M')} · Kyiv</i>"
     ]
-    return "\n".join(lines)
+    
+    return "\n".join(L)
 
 
 def journal_write(row: dict) -> None:
@@ -953,7 +961,6 @@ def fetch_high_impact_events():
 
 
 def evaluate_pair(pair: str, state: dict, news_events: list):
-    """FIX 40: кінцевий автомат серій."""
     for ev in news_events:
         clean = pair.replace("=X", "")
         if ev["currency"] in (clean[:3], clean[3:6]) and -NEWS_AFTER_MIN <= (ev["time"] - datetime.now(TZ)).total_seconds() / 60 <= NEWS_BEFORE_MIN:
@@ -992,7 +999,6 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
     sig_key = f"{pair}_ladder_sig"
 
     if state.get(sig_key) != sig:
-        # FIX 43: беремо тільки денний профіль
         profile_window = get_daily_profile_window(df5)
         if profile_window.empty: return None
         new_ladder = build_entry_ladder(profile_window, trend, pair)
@@ -1025,7 +1031,6 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
     else:
         loc_dir = ""
 
-    # FIX 47: розрахунок score
     def calc_score(level):
         width = max(level["hi"] - level["lo"], 1e-12)
         depth = (level["hi"] - current_price) / width if trend == "BUY" else (current_price - level["lo"]) / width
