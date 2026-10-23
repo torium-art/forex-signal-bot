@@ -141,3 +141,4 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-22 14:32,EURCHF,SELL,1,0.92029,0.92125,0.92052,5,0.0,11.04,0.408,structure24,True,sent,0.0,0.967,medium,11,3,False
 2026-10-22 14:34,USDJPY,SELL,1,156.9026,157.0134,156.91901,5,0.0,7.08,0.291,structure24,True,sent,0.0,0.877,medium,11,3,False
 2026-10-22 15:23,EURJPY,SELL,1,175.9814,176.1292,176.07001,5,36.7,4.75,0.289,structure24,True,sent,0.0,0.999,weak,12,3,False
+2026-10-23 16:03,USDJPY,SELL,1,156.47094,156.54347,156.48801,5,34.1,3.55,0.164,structure24,True,sent,0.0,1.443,weak,13,4,False
