@@ -1,5 +1,5 @@
 """
-Forex Price-Action Signal Bot — v30.2
+Forex Price-Action Signal Bot — v30.3
 FIX 22: POC-інверсія
 FIX 23: soft-log
 FIX 24: трекінг траєкторії
@@ -37,6 +37,9 @@ FIX 49: білий список Medium-новин (claims, crude oil, monetary p
 FIX 50: алерт у Telegram, якщо календар новин недоступний >6 год
 FIX 51: ранковий огляд новин на день (~10:00) одним повідомленням
 FIX 52: одне попередження на подію, а не на кожну пару
+FIX 55: ПОСТІЙНИЙ ЛОГ СКАНУВАННЯ — кожен цикл друкує причину по кожній парі
+FIX 56: новинні попередження по всіх подіях вікна за один прохід +
+        адаптивний текст ("щойно вийшла" замість "скоро")
 """
 import csv
 import json
@@ -148,15 +151,16 @@ NEWS_BEFORE_MIN = 25
 NEWS_AFTER_MIN = 20
 WATCHED_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"}
 
-# FIX 49: Medium-новини, які реально рухають ринок і мають блокувати пари
 MEDIUM_BLOCK_KEYWORDS = [
     "claims", "crude oil", "natural gas", "monetary policy", "interest rate",
     "cpi", "ppi", "gdp", "retail", "pmi", "nonfarm", "fomc",
     "trade balance", "consumer price", "unemployment",
 ]
 
-# FIX 50: максимальний вік кешу новин, після якого кричимо тривогу
 NEWS_MAX_AGE_HOURS = 6
+
+# FIX 55: буфер причин пропуску за поточний цикл
+SCAN_LOG = []
 
 TRAJECTORY_POINTS = [2, 4, 6, 8, 10, 12, 14]
 TRACKING_HEALTH_HOURS = 24
@@ -667,10 +671,9 @@ def send_telegram_message(html_text: str) -> bool:
 
 
 # ============================================================
-# НОВИНИ: FIX 37 + FIX 49 + FIX 50 + FIX 51 + FIX 52
+# НОВИНИ: FIX 37 + FIX 49 + FIX 50 + FIX 51 + FIX 52 + FIX 56
 # ============================================================
 def _news_event_ok(e: dict) -> bool:
-    """FIX 49: High беремо всі; Medium — тільки з білого списку ключових слів."""
     imp = e.get("impact")
     if imp == "High":
         return True
@@ -715,7 +718,6 @@ def fetch_high_impact_events():
 
 
 def news_health_alert(state: dict) -> None:
-    """FIX 50: якщо календар старий або відсутній у торговий час — тривога раз на день."""
     if not in_trading_window():
         return
     age_h = 999.0
@@ -734,7 +736,6 @@ def news_health_alert(state: dict) -> None:
 
 
 def send_daily_news_calendar(state: dict) -> None:
-    """FIX 51: раз на день (~10:00) шле список блокувальних новин на сьогодні."""
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     if state.get("last_news_calendar") == today:
@@ -758,12 +759,18 @@ def send_daily_news_calendar(state: dict) -> None:
 
 
 def maybe_send_news_warning(pair: str, event: dict, state: dict) -> None:
-    """FIX 37 + FIX 52: ОДНЕ попередження на подію (не на кожну пару)."""
+    """FIX 52 + FIX 56: одне попередження на подію, адаптивний текст."""
     key = f"news_{event['title']}_{event['time'].strftime('%Y%m%d%H%M')}"
     if state.get(key):
         return
-    msg = (f"⚠️ <b>Скоро важлива новина: {event['title']} ({event['currency']})</b>\n"
-           f"Час виходу: {event['time'].strftime('%H:%M')} (Kyiv)\n"
+    delta = (event["time"] - datetime.now(TZ)).total_seconds() / 60
+    if delta >= 0:
+        when = f"Скоро вихід: {event['time'].strftime('%H:%M')} (Kyiv)"
+    else:
+        when = (f"Новина ВИЙШЛА о {event['time'].strftime('%H:%M')} (Kyiv), "
+                f"вікно блокування ще діє")
+    msg = (f"⚠️ <b>Важлива новина: {event['title']} ({event['currency']})</b>\n"
+           f"{when}\n"
            f"Бот блокує всі пари з {event['currency']} за {NEWS_BEFORE_MIN} хв до "
            f"і {NEWS_AFTER_MIN} хв після.\n"
            f"Рекомендація: не торгуй ці валюти вручну у цьому вікні.")
@@ -883,12 +890,10 @@ def send_daily_report(state: dict) -> None:
 # FIX 48: НОВИЙ ДИЗАЙН ПОВІДОМЛЕНЬ
 # ============================================================
 def _vis_len(t: str) -> int:
-    """Емодзі ≈ вдвічі ширші за символи."""
     return sum(2 if ord(c) >= 0x2100 else 1 for c in t)
 
 
 def color_frame(lines: list, sq: str) -> str:
-    """Рамка з кольорових квадратів: верх/низ + боки."""
     top = sq * ((max(_vis_len(t) for t in lines) + 5) // 2)
     return "\n".join([top, *[f"{sq} {t} {sq}" for t in lines], top])
 
@@ -1030,49 +1035,71 @@ def outcome_write(row: dict) -> None:
         w.writerow(row)
 
 
+# ============================================================
+# FIX 55: допоміжна функція логу сканування
+# ============================================================
+def _skip(pair: str, reason: str):
+    SCAN_LOG.append((pair.replace("=X", ""), reason))
+    return None
+
+
 def evaluate_pair(pair: str, state: dict, news_events: list):
+    clean = pair.replace("=X", "")
+
+    # FIX 56: збираємо ВСІ події у вікні, попереджуємо по кожній, блокуємо пару
+    matched = []
     for ev in news_events:
-        clean = pair.replace("=X", "")
         if ev["currency"] in (clean[:3], clean[3:6]) and -NEWS_AFTER_MIN <= (ev["time"] - datetime.now(TZ)).total_seconds() / 60 <= NEWS_BEFORE_MIN:
+            matched.append(ev)
+    if matched:
+        for ev in matched:
             maybe_send_news_warning(pair, ev, state)
-            return None
+        return _skip(pair, f"БЛОК НОВИНА {matched[0]['title']} ({matched[0]['time'].strftime('%H:%M')})")
 
     series_state = state.get(f"{pair}_series_state", "SCANNING")
     frozen_until = state.get(f"{pair}_frozen_until", 0)
-
     if time.time() < frozen_until:
-        return None
+        return _skip(pair, "заморожена після серії")
 
     df30 = fetch_candles(pair, interval="30m", period="30d")
-    if df30.empty: return None
+    if df30.empty:
+        return _skip(pair, "немає даних M30")
     trend, source, er = analyze_trend_30m(df30)
-    if trend is None: return None
+    if trend is None:
+        return _skip(pair, f"— тренд M30: {source}")
 
     df5 = fetch_candles(pair, interval="5m", period="5d")
-    if len(df5) < IMPULSE_LOOKBACK_5M: return None
+    if len(df5) < IMPULSE_LOOKBACK_5M:
+        return _skip(pair, "мало даних M5")
 
     low, high, window = find_last_impulse(df5)
     impulse_range = high - low
-    if impulse_range <= 0: return None
+    if impulse_range <= 0:
+        return _skip(pair, "немає імпульсу на M5")
 
     current_price = float(df5["Close"].iloc[-1])
     pullback_depth = (high - current_price) / impulse_range if trend == "BUY" else (current_price - low) / impulse_range
-    if pullback_depth < MIN_PULLBACK_FRACTION: return None
+    if pullback_depth < MIN_PULLBACK_FRACTION:
+        return _skip(pair, f"{trend} — відкат замалий ({pullback_depth:.2f})")
 
-    if state.get(f"{pair}_abandon_until", 0) > time.time(): return None
+    if state.get(f"{pair}_abandon_until", 0) > time.time():
+        return _skip(pair, f"{trend} — abandon (POC пробито)")
 
     digits = 3 if "JPY" in pair else 4
     sig = f"{low:.{digits}f}|{high:.{digits}f}"
-    if state.get(f"{pair}_done_sig") == sig: return None
+    if state.get(f"{pair}_done_sig") == sig:
+        return _skip(pair, f"{trend} — імпульс уже відпрацьований")
 
     ladder_key = f"{pair}_ladder_data"
     sig_key = f"{pair}_ladder_sig"
 
     if state.get(sig_key) != sig:
         profile_window = get_daily_profile_window(df5)
-        if profile_window.empty: return None
+        if profile_window.empty:
+            return _skip(pair, "порожній денний профіль")
         new_ladder = build_entry_ladder(profile_window, trend, pair)
-        if not new_ladder: return None
+        if not new_ladder:
+            return _skip(pair, f"{trend} — драбина не будується (зони/POC<10%/немає Л2/нерівномірна)")
         state[ladder_key] = new_ladder
         state[sig_key] = sig
         opposite = "SELL" if trend == "BUY" else "BUY"
@@ -1081,14 +1108,15 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
 
     ladder = state[ladder_key]
     if len(ladder) < 3:
-        return None
+        return _skip(pair, f"{trend} — драбина < 3 рівнів")
 
     l1, l2, l3 = ladder[0], ladder[1], ladder[2]
 
     if l3["strength"] < MIN_POC_STRENGTH:
-        return None
+        return _skip(pair, f"{trend} — POC слабкий ({l3['strength']*100:.1f}%)")
 
-    if cooldown_active(state, pair): return None
+    if cooldown_active(state, pair):
+        return _skip(pair, f"{trend} — кулдаун 3 хв")
 
     breakout = is_impulsive_breakout(df5, trend)
     atr_ratio = compute_atr_ratio(df5, 14, 20)
@@ -1106,93 +1134,96 @@ def evaluate_pair(pair: str, state: dict, news_events: list):
         depth = (level["hi"] - current_price) / width if trend == "BUY" else (current_price - level["lo"]) / width
         return round(300 * float(level["strength"]) + 20 * (1.0 - min(1.0, max(0.0, depth))) + (15 if level["is_poc"] else 0) + 25 * min(1.0, er / 0.5), 1)
 
+    def cand(level, next_state):
+        SCAN_LOG.append((clean, f"{trend} — КАНДИДАТ L{level['level']}!"))
+        return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
+                "level": level, "entry": current_price, "score": calc_score(level), "breakout": breakout,
+                "sig": sig, "atr_ratio": round(atr_ratio, 3),
+                "er5": round(er5, 3), "loc_dir": loc_dir,
+                "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
+                "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
+                "next_state": next_state}
+
     if series_state == "SCANNING":
-        if in_zone(current_price, l1, trend) and approach_ok(df5, l1, trend):
-            if not zone_is_dwelling(df5, l1):
-                return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
-                        "level": l1, "entry": current_price, "score": calc_score(l1), "breakout": breakout,
-                        "sig": sig, "atr_ratio": round(atr_ratio, 3),
-                        "er5": round(er5, 3), "loc_dir": loc_dir,
-                        "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
-                        "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
-                        "next_state": "L1_ACTIVE"}
+        if not in_zone(current_price, l1, trend):
+            return _skip(pair, f"{trend} [SCANNING] — ціна {current_price:.5f} поза зоною L1 ({l1['lo']:.5f}–{l1['hi']:.5f})")
+        if not approach_ok(df5, l1, trend):
+            return _skip(pair, f"{trend} [SCANNING] — у зоні L1, але немає підходу")
+        if zone_is_dwelling(df5, l1):
+            return _skip(pair, f"{trend} [SCANNING] — ціна «сидить» у зоні L1")
+        return cand(l1, "L1_ACTIVE")
 
-    elif series_state == "L1_ACTIVE":
+    if series_state == "L1_ACTIVE":
         pending = next((o for o in state.get("pending_outcomes", []) if o["pair"] == pair and o.get("level") == 1), None)
-        if pending:
-            if in_zone(current_price, l2, trend):
-                return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
-                        "level": l2, "entry": current_price, "score": calc_score(l2), "breakout": breakout,
-                        "sig": sig, "atr_ratio": round(atr_ratio, 3),
-                        "er5": round(er5, 3), "loc_dir": loc_dir,
-                        "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
-                        "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
-                        "next_state": "L2_ACTIVE"}
+        if not pending:
+            return _skip(pair, f"{trend} [L1_ACTIVE] — немає відкритої угоди L1")
+        if in_zone(current_price, l2, trend):
+            return cand(l2, "L2_ACTIVE")
+        return _skip(pair, f"{trend} [L1_ACTIVE] — ціна поза зоною L2 ({l2['lo']:.5f}–{l2['hi']:.5f})")
 
-    elif series_state == "L2_ACTIVE":
+    if series_state == "L2_ACTIVE":
         pending = next((o for o in state.get("pending_outcomes", []) if o["pair"] == pair and o.get("level") == 2), None)
-        if pending:
-            if in_zone(current_price, l3, trend):
-                return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
-                        "level": l3, "entry": current_price, "score": calc_score(l3), "breakout": breakout,
-                        "sig": sig, "atr_ratio": round(atr_ratio, 3),
-                        "er5": round(er5, 3), "loc_dir": loc_dir,
-                        "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
-                        "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
-                        "next_state": "L3_ACTIVE"}
-
+        if pending and in_zone(current_price, l3, trend):
+            return cand(l3, "L3_ACTIVE")
         series_started = state.get(f"{pair}_series_started_at", 0)
-        time_since_l2 = time.time() - series_started
-        if time_since_l2 > L2_TIMEOUT_MIN * 60:
+        if time.time() - series_started > L2_TIMEOUT_MIN * 60:
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.2] {pair}: таймер Л2 вийшов, серія закрита")
-            return None
-
+            print(f"[v30.3] {pair}: таймер Л2 вийшов, серія закрита")
+            return _skip(pair, f"{trend} — таймер Л2 вийшов, серія закрита")
         if zone_broken(l2, df5, trend):
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.2] {pair}: Л2 пробито, серія закрита")
-            return None
+            print(f"[v30.3] {pair}: Л2 пробито, серія закрита")
+            return _skip(pair, f"{trend} — Л2 пробито, серія закрита")
+        if not pending:
+            return _skip(pair, f"{trend} [L2_ACTIVE] — немає відкритої угоди L2")
+        return _skip(pair, f"{trend} [L2_ACTIVE] — ціна поза зоною L3 ({l3['lo']:.5f}–{l3['hi']:.5f})")
 
-    elif series_state == "WAITING_L3":
-        if in_zone(current_price, l3, trend):
-            return {"pair": pair, "trend": trend, "source": source, "er": round(er, 3),
-                    "level": l3, "entry": current_price, "score": calc_score(l3), "breakout": breakout,
-                    "sig": sig, "atr_ratio": round(atr_ratio, 3),
-                    "er5": round(er5, 3), "loc_dir": loc_dir,
-                    "hour_utc": now_dt.astimezone(ZoneInfo("UTC")).hour, "day_of_week": now_dt.weekday(),
-                    "is_cpi_day": any("CPI" in ev.get("title", "") and ev.get("currency") == "USD" for ev in news_events),
-                    "next_state": "L3_ACTIVE"}
-
+    if series_state == "WAITING_L3":
         waiting_since = state.get(f"{pair}_waiting_l3_since", 0)
-        time_waiting = time.time() - waiting_since
-        if time_waiting > L3_WAIT_MIN * 60:
+        if time.time() - waiting_since > L3_WAIT_MIN * 60:
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.2] {pair}: таймер Л3 вийшов, серія закрита")
-            return None
-
+            print(f"[v30.3] {pair}: таймер Л3 вийшов, серія закрита")
+            return _skip(pair, f"{trend} — таймер Л3 вийшов, серія закрита")
         if zone_broken(l2, df5, trend):
             state[f"{pair}_frozen_until"] = time.time() + FREEZE_MIN * 60
             state[f"{pair}_series_state"] = "SCANNING"
-            print(f"[v30.2] {pair}: Л2 пробито під час очікування Л3, серія закрита")
-            return None
+            print(f"[v30.3] {pair}: Л2 пробито під час очікування Л3, серія закрита")
+            return _skip(pair, f"{trend} — Л2 пробито під час очікування Л3")
+        if in_zone(current_price, l3, trend):
+            return cand(l3, "L3_ACTIVE")
+        return _skip(pair, f"{trend} [WAITING_L3] — ціна поза зоною L3 ({l3['lo']:.5f}–{l3['hi']:.5f})")
 
-    return None
+    if series_state == "L3_ACTIVE":
+        pending = next((o for o in state.get("pending_outcomes", []) if o["pair"] == pair and o.get("level") == 3), None)
+        if not pending:
+            return _skip(pair, f"{trend} [L3_ACTIVE] — немає відкритої угоди L3")
+        return _skip(pair, f"{trend} [L3_ACTIVE] — чекає результат POC")
+
+    return _skip(pair, f"{trend} — невідомий стан {series_state}")
 
 
 def run_cycle(state: dict, news_events: list = None) -> None:
     if news_events is None:
         news_events = fetch_high_impact_events()
+    SCAN_LOG.clear()
     candidates = []
     for pair in PAIRS:
         try:
             cand = evaluate_pair(pair, state, news_events)
             if cand: candidates.append(cand)
-        except Exception:
-            pass
+        except Exception as e:
+            SCAN_LOG.append((pair.replace("=X", ""), f"ПОМИЛКА: {e}"))
         time.sleep(BETWEEN_PAIRS_SLEEP_SEC)
+
+    # FIX 55: постійний лог сканування — видно кожну пару і причину
+    ts = datetime.now(TZ).strftime("%H:%M")
+    print(f"[скан {ts}] старт: {len(PAIRS)} пар")
+    for clean, reason in SCAN_LOG:
+        print(f"   {clean}: {reason}")
+    print(f"[скан {ts}] готово | кандидатів: {len(candidates)}")
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     sent_count = 0
@@ -1301,7 +1332,6 @@ def main_loop() -> None:
             process_trajectory(state)
             news_events = fetch_high_impact_events()
             run_cycle(state, news_events)
-            # FIX 39 + лічильник новин: видно, що фільтр живий
             print(f"[цикл] {datetime.now(TZ).strftime('%H:%M')} OK | відкритих серій: {len(state.get('pending_outcomes', []))} | новин: {len(news_events)}")
             send_daily_news_calendar(state)
             news_health_alert(state)
