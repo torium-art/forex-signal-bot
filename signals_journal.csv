@@ -150,3 +150,4 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-27 13:31,GBPAUD,SELL,1,1.89452,1.89522,1.89452,5,41.7,4.41,0.169,structure24,True,sent,0.0,0.989,weak,11,1,False
 2026-10-27 18:33,GBPAUD,SELL,1,1.89219,1.89299,1.89239,5,40.6,3.17,0.319,structure24,True,sent,0.0,0.791,weak,16,1,False
 2026-10-27 18:47,GBPUSD,SELL,1,1.33116,1.33145,1.3312,5,38.6,3.6,0.213,structure24,True,sent,0.0,0.718,weak,16,1,False
+2026-10-27 19:25,USDCAD,BUY,1,1.40417,1.40447,1.40445,5,37.3,2.69,0.211,structure24,True,sent,0.0,0.884,weak,17,1,False
