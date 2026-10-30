@@ -154,3 +154,4 @@ ts,pair,direction,level,zone_lo,zone_hi,entry_price,expiry_min,score,strength_pc
 2026-10-28 10:37,CHFJPY,SELL,1,189.9623,190.01317,189.97501,5,37.6,4.91,0.156,structure24,True,sent,0.0,1.163,weak,8,2,False
 2026-10-30 12:34,GBPAUD,BUY,1,1.90865,1.90927,1.90919,5,49.4,5.65,0.302,structure24,True,sent,0.0,0.908,medium,10,4,False
 2026-10-30 13:21,USDJPY,SELL,1,157.17,157.23067,157.174,5,39.5,3.4,0.212,structure24,True,sent,0.0,1.064,weak,11,4,False
+2026-10-30 14:27,AUDJPY,SELL,1,110.44894,110.4952,110.47,5,28.9,3.4,0.155,structure24,True,sent,0.0,1.249,weak,12,4,False
